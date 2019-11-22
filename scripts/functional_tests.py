@@ -12,10 +12,10 @@ import sys
 galaxy_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir))
 sys.path[1:1] = [os.path.join(galaxy_root, "lib"), os.path.join(galaxy_root, "test")]
 
-from base import driver_util
-log = driver_util.build_logger()
+from galaxy_test.base.api_util import get_master_api_key, get_user_api_key
+from galaxy_test.driver import driver_util
 
-from base.api_util import get_master_api_key, get_user_api_key
+log = driver_util.build_logger()
 
 
 class MigratedToolsGalaxyTestDriver(driver_util.GalaxyTestDriver):
@@ -63,7 +63,7 @@ class SeleniumGalaxyTestDriver(driver_util.GalaxyTestDriver):
 
     @driver_util.classproperty
     def default_web_host(cls):
-        from selenium_tests.framework import default_web_host_for_selenium_tests
+        from galaxy_test.selenium.framework import default_web_host_for_selenium_tests
         return default_web_host_for_selenium_tests()
 
 
@@ -71,6 +71,8 @@ class FrameworkToolsGalaxyTestDriver(DefaultGalaxyTestDriver):
     """Galaxy-style nose TestDriver for testing framework Galaxy tools."""
 
     framework_tool_and_types = True
+    conda_auto_init = True
+    conda_auto_install = True
 
 
 class DataManagersGalaxyTestDriver(driver_util.GalaxyTestDriver):
@@ -85,6 +87,8 @@ class DataManagersGalaxyTestDriver(driver_util.GalaxyTestDriver):
             testing_shed_tools=self.testing_shed_tools,
             master_api_key=get_master_api_key(),
             user_api_key=get_user_api_key(),
+            user_email=self.app.config.admin_users_list[0],
+            create_admin=True,
         )
 
 

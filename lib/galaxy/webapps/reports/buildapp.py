@@ -1,26 +1,19 @@
 """
 Provides factory methods to assemble the Galaxy web application
 """
-
-import logging
 import atexit
+import logging
 import os
-
 from inspect import isclass
 
 from paste import httpexceptions
 
-from galaxy.util import asbool
-from galaxy.webapps.util import (
-    MiddlewareWrapUnsupported,
-    build_template_error_formatters,
-    wrap_if_allowed,
-    wrap_if_allowed_or_fail
-)
 import galaxy.model
 import galaxy.model.mapping
 import galaxy.web.framework.webapp
+from galaxy.util import asbool
 from galaxy.util.properties import load_app_properties
+from galaxy.webapps.util import wrap_if_allowed
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +27,7 @@ def add_ui_controllers(webapp, app):
     Search for controllers in the 'galaxy.webapps.controllers' module and add
     them to the webapp.
     """
-    from galaxy.web.base.controller import BaseUIController
+    from galaxy.webapps.base.controller import BaseUIController
     import galaxy.webapps.reports.controllers
     controller_dir = galaxy.webapps.reports.controllers.__path__[0]
     for fname in os.listdir(controller_dir):
@@ -81,7 +74,7 @@ def app_factory(global_conf, load_app_kwds={}, **kwargs):
     # Close any pooled database connections before forking
     try:
         galaxy.model.mapping.metadata.bind.dispose()
-    except:
+    except Exception:
         log.exception("Unable to dispose of pooled galaxy model database connections.")
     # Return
     return webapp
@@ -120,23 +113,9 @@ def wrap_in_middleware(app, global_conf, application_stack, **local_conf):
         if asbool(conf.get('use_printdebug', True)):
             from paste.debug import prints
             app = wrap_if_allowed(app, stack, prints.PrintDebugMiddleware, args=(conf,))
-    if debug and asbool(conf.get('use_interactive', False)):
-        # Interactive exception debugging, scary dangerous if publicly
-        # accessible, if not enabled we'll use the regular error printing
-        # middleware.
-        try:
-            from weberror import evalexception
-            app = wrap_if_allowed_or_fail(app, stack, evalexception.EvalException,
-                                          args=(conf,),
-                                          kwargs=dict(templating_formatters=build_template_error_formatters()))
-        except MiddlewareWrapUnsupported as exc:
-            log.warning(str(exc))
-            import galaxy.web.framework.middleware.error
-            app = wrap_if_allowed(app, stack, galaxy.web.framework.middleware.error.ErrorMiddleware, args=(conf,))
-    else:
-        # Not in interactive debug mode, just use the regular error middleware
-        import galaxy.web.framework.middleware.error
-        app = wrap_if_allowed(app, stack, galaxy.web.framework.middleware.error.ErrorMiddleware, args=(conf,))
+    # Error middleware
+    import galaxy.web.framework.middleware.error
+    app = wrap_if_allowed(app, stack, galaxy.web.framework.middleware.error.ErrorMiddleware, args=(conf,))
     # Transaction logging (apache access.log style)
     if asbool(conf.get('use_translogger', True)):
         from paste.translogger import TransLogger

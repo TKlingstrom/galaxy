@@ -3,15 +3,15 @@ Job control via a command line interface (e.g. qsub/qstat), possibly over a remo
 """
 
 import logging
+import time
 
 from galaxy import model
 from galaxy.jobs import JobDestination
 from galaxy.jobs.runners import (
     AsynchronousJobRunner,
-    AsynchronousJobState
-)
+    AsynchronousJobState,
+    JobState)
 from galaxy.util import asbool
-
 from .util.cli import CliInterface, split_params
 
 log = logging.getLogger(__name__)
@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 __all__ = ('ShellJobRunner', )
 
 DEFAULT_EMBED_METADATA_IN_JOB = True
+MAX_SUBMIT_RETRY = 3
 
 
 class ShellJobRunner(AsynchronousJobRunner):
@@ -75,12 +76,13 @@ class ShellJobRunner(AsynchronousJobRunner):
         script = self.get_job_file(
             job_wrapper,
             exit_code_path=ajs.exit_code_file,
+            shell=job_wrapper.shell,
             **job_file_kwargs
         )
 
         try:
             self.write_executable_script(ajs.job_file, script)
-        except:
+        except Exception:
             log.exception("(%s) failure writing job script" % galaxy_id_tag)
             job_wrapper.fail("failure preparing job script", exception=True)
             return
@@ -94,15 +96,13 @@ class ShellJobRunner(AsynchronousJobRunner):
 
         log.debug("(%s) submitting file: %s" % (galaxy_id_tag, ajs.job_file))
 
-        cmd_out = shell.execute(job_interface.submit(ajs.job_file))
-        if cmd_out.returncode != 0:
-            log.error('(%s) submission failed (stdout): %s' % (galaxy_id_tag, cmd_out.stdout))
-            log.error('(%s) submission failed (stderr): %s' % (galaxy_id_tag, cmd_out.stderr))
+        returncode, stdout = self.submit(shell, job_interface, ajs.job_file, galaxy_id_tag, retry=MAX_SUBMIT_RETRY)
+        if returncode != 0:
             job_wrapper.fail("failure submitting job")
             return
         # Some job runners return something like 'Submitted batch job XXXX'
         # Strip and split to get job ID.
-        external_job_id = cmd_out.stdout.strip().split()[-1]
+        external_job_id = stdout.strip().split()[-1]
         if not external_job_id:
             log.error('(%s) submission did not return a job identifier, failing job' % galaxy_id_tag)
             job_wrapper.fail("failure submitting job")
@@ -120,6 +120,28 @@ class ShellJobRunner(AsynchronousJobRunner):
 
         # Add to our 'queue' of jobs to monitor
         self.monitor_queue.put(ajs)
+
+    def submit(self, shell, job_interface, job_file, galaxy_id_tag, retry=MAX_SUBMIT_RETRY, timeout=10):
+        """
+        Handles actual job script submission.
+
+        If submission fails will retry `retry` time with a timeout of `timeout` seconds.
+        Retuns the returncode of the submission and the stdout, which contains the external job_id.
+        """
+        cmd_out = shell.execute(job_interface.submit(job_file))
+        if cmd_out.returncode == 0:
+            return cmd_out.returncode, cmd_out.stdout
+        stdout = '(%s) submission failed (stdout): %s' % (galaxy_id_tag, cmd_out.stdout)
+        stderr = '(%s) submission failed (stderr): %s' % (galaxy_id_tag, cmd_out.stderr)
+        if retry > 0:
+            log.debug("%s, retrying in %s seconds", stdout, timeout)
+            log.debug("%s, retrying in %s seconds", stderr, timeout)
+            time.sleep(timeout)
+            return self.submit(shell, job_interface, job_file, galaxy_id_tag, retry=retry - 1, timeout=timeout)
+        else:
+            log.error(stdout)
+            log.error(stderr)
+            return cmd_out.returncode, cmd_out.stdout
 
     def check_watched_items(self):
         """
@@ -155,6 +177,12 @@ class ShellJobRunner(AsynchronousJobRunner):
                 if not state == model.Job.states.OK:
                     # No need to change_state when the state is OK, this will be handled by `self.finish_job`
                     ajs.job_wrapper.change_state(state)
+                if state == model.Job.states.ERROR:
+                    # Try to find out the reason for exiting
+                    self.__handle_out_of_memory(ajs, external_job_id)
+                    self.work_queue.put((self.mark_as_failed, ajs))
+                    # Don't add the job to the watched items once it fails, deals with https://github.com/galaxyproject/galaxy/issues/7820
+                    continue
             if state == model.Job.states.RUNNING and not ajs.running:
                 ajs.running = True
             ajs.old_state = state
@@ -165,6 +193,16 @@ class ShellJobRunner(AsynchronousJobRunner):
                 new_watched.append(ajs)
         # Replace the watch list with the updated version
         self.watched = new_watched
+
+    def __handle_out_of_memory(self, ajs, external_job_id):
+        shell_params, job_params = self.parse_destination_params(ajs.job_destination.params)
+        shell, job_interface = self.get_cli_plugins(shell_params, job_params)
+        cmd_out = shell.execute(job_interface.get_failure_reason(external_job_id))
+        if cmd_out is not None:
+            if job_interface.parse_failure_reason(cmd_out.stdout, external_job_id) \
+                    == JobState.runner_states.MEMORY_LIMIT_REACHED:
+                ajs.runner_state = JobState.runner_states.MEMORY_LIMIT_REACHED
+                ajs.fail_message = "Tool failed due to insufficient memory. Try with more memory."
 
     def __get_job_states(self):
         job_destinations = {}
@@ -186,8 +224,9 @@ class ShellJobRunner(AsynchronousJobRunner):
             job_states.update(job_interface.parse_status(cmd_out.stdout, job_ids))
         return job_states
 
-    def stop_job(self, job):
+    def stop_job(self, job_wrapper):
         """Attempts to delete a dispatched job"""
+        job = job_wrapper.get_job()
         try:
             shell_params, job_params = self.parse_destination_params(job.destination_params)
             shell, job_interface = self.get_cli_plugins(shell_params, job_params)

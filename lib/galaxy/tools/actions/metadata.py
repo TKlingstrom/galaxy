@@ -1,10 +1,11 @@
 import logging
+import os
+from collections import OrderedDict
 from json import dumps
 
-from galaxy.datatypes.metadata import JobExternalOutputMetadataWrapper
-from galaxy.jobs.datasets import DatasetPath
-from galaxy.util.odict import odict
-
+from galaxy.job_execution.datasets import DatasetPath
+from galaxy.metadata import get_metadata_compute_strategy
+from galaxy.util import asbool
 from . import ToolAction
 
 log = logging.getLogger(__name__)
@@ -17,8 +18,12 @@ class SetMetadataToolAction(ToolAction):
         """
         Execute using a web transaction.
         """
-        job, odict = self.execute_via_app(tool, trans.app, trans.get_galaxy_session().id,
-                                          trans.history.id, trans.user, incoming, set_output_hid,
+        trans.check_user_activation()
+        session = trans.get_galaxy_session()
+        session_id = session and session.id
+        history_id = trans.history and trans.history.id
+        job, odict = self.execute_via_app(tool, trans.app, session_id,
+                                          history_id, trans.user, incoming, set_output_hid,
                                           overwrite, history, job_params)
         # FIXME: can remove this when logging in execute_via_app method.
         trans.log_event("Added set external metadata job to the job queue, id: %s" % str(job.id), tool_id=job.tool_id)
@@ -30,7 +35,11 @@ class SetMetadataToolAction(ToolAction):
         """
         Execute using application.
         """
+
         for name, value in incoming.items():
+            # Why are we looping here and not just using a fixed input name? Needed?
+            if not name.startswith("input"):
+                continue
             if isinstance(value, app.model.HistoryDatasetAssociation):
                 dataset = value
                 dataset_name = name
@@ -48,6 +57,7 @@ class SetMetadataToolAction(ToolAction):
 
         # Create the job object
         job = app.model.Job()
+        job.galaxy_version = app.config.version_major
         job.session_id = session_id
         job.history_id = history_id
         job.tool_id = tool.id
@@ -59,10 +69,10 @@ class SetMetadataToolAction(ToolAction):
         try:
             # For backward compatibility, some tools may not have versions yet.
             job.tool_version = tool.version
-        except:
+        except AttributeError:
             job.tool_version = "1.0.1"
+        job.dynamic_tool = tool.dynamic_tool
         job.state = job.states.WAITING  # we need to set job state to something other than NEW, or else when tracking jobs in db it will be picked up before we have added input / output parameters
-        job.set_handler(tool.get_job_handler(job_params))
         sa_session.add(job)
         sa_session.flush()  # ensure job.id is available
 
@@ -72,8 +82,15 @@ class SetMetadataToolAction(ToolAction):
         input_paths = [DatasetPath(dataset.id, real_path=dataset.file_name, mutable=False)]
         app.object_store.create(job, base_dir='job_work', dir_only=True, extra_dir=str(job.id))
         job_working_dir = app.object_store.get_filename(job, base_dir='job_work', dir_only=True, extra_dir=str(job.id))
-        external_metadata_wrapper = JobExternalOutputMetadataWrapper(job)
-        cmd_line = external_metadata_wrapper.setup_external_metadata(dataset,
+        datatypes_config = os.path.join(job_working_dir, 'registry.xml')
+        app.datatypes_registry.to_xml_file(path=datatypes_config)
+        external_metadata_wrapper = get_metadata_compute_strategy(app.config, job.id)
+        output_datatasets_dict = {
+            dataset_name: dataset,
+        }
+        validate_outputs = asbool(incoming.get("validate", False))
+        cmd_line = external_metadata_wrapper.setup_external_metadata(output_datatasets_dict,
+                                                                     {},
                                                                      sa_session,
                                                                      exec_dir=None,
                                                                      tmp_dir=job_working_dir,
@@ -81,11 +98,12 @@ class SetMetadataToolAction(ToolAction):
                                                                      output_fnames=input_paths,
                                                                      config_root=app.config.root,
                                                                      config_file=app.config.config_file,
-                                                                     datatypes_config=app.datatypes_registry.integrated_datatypes_configs,
-                                                                     job_metadata=None,
+                                                                     datatypes_config=datatypes_config,
+                                                                     job_metadata=os.path.join(job_working_dir, 'working', tool.provided_metadata_file),
                                                                      include_command=False,
+                                                                     validate_outputs=validate_outputs,
                                                                      max_metadata_value_size=app.config.max_metadata_value_size,
-                                                                     kwds={'overwrite' : overwrite})
+                                                                     kwds={'overwrite': overwrite})
         incoming['__SET_EXTERNAL_METADATA_COMMAND_LINE__'] = cmd_line
         for name, value in tool.params_to_strings(incoming, app).items():
             job.add_parameter(name, value)
@@ -101,11 +119,11 @@ class SetMetadataToolAction(ToolAction):
         sa_session.flush()
 
         # Queue the job for execution
-        app.job_queue.put(job.id, tool.id)
+        app.job_manager.enqueue(job, tool=tool)
         # FIXME: need to add event logging to app and log events there rather than trans.
         # trans.log_event( "Added set external metadata job to the job queue, id: %s" % str(job.id), tool_id=job.tool_id )
 
         # clear e.g. converted files
         dataset.datatype.before_setting_metadata(dataset)
 
-        return job, odict()
+        return job, OrderedDict()

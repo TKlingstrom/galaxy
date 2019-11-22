@@ -1,15 +1,46 @@
-from json import loads
 
 from markupsafe import escape
-from sqlalchemy import and_, desc, false, true
+from sqlalchemy import (
+    and_,
+    desc,
+    false,
+    true
+)
+from sqlalchemy.orm import (
+    eagerload,
+    undefer
+)
 
-from galaxy import managers, model, util, web
+from galaxy import (
+    exceptions,
+    model,
+    util,
+    web
+)
+from galaxy.managers.hdas import HDAManager
+from galaxy.managers.histories import HistoryManager, HistorySerializer
+from galaxy.managers.pages import (
+    get_page_identifiers,
+    PageContentProcessor,
+    PageManager,
+)
 from galaxy.model.item_attrs import UsesItemRatings
 from galaxy.util import unicodify
-from galaxy.util.sanitize_html import _BaseHTMLProcessor, sanitize_html
-from galaxy.web import error, url_for
-from galaxy.web.base.controller import BaseUIController, SharableMixin, UsesStoredWorkflowMixin, UsesVisualizationMixin
-from galaxy.web.framework.helpers import grids, time_ago
+from galaxy.util.sanitize_html import sanitize_html
+from galaxy.web import (
+    error,
+    url_for
+)
+from galaxy.web.framework.helpers import (
+    grids,
+    time_ago
+)
+from galaxy.webapps.base.controller import (
+    BaseUIController,
+    SharableMixin,
+    UsesStoredWorkflowMixin,
+    UsesVisualizationMixin
+)
 
 
 def format_bool(b):
@@ -32,7 +63,7 @@ class PageListGrid(grids.Grid):
     default_filter = {"published": "All", "tags": "All", "title": "All", "sharing": "All"}
     default_sort_key = "-update_time"
     columns = [
-        grids.TextColumn("Title", key="title", attach_popup=True, filterable="advanced"),
+        grids.TextColumn("Title", key="title", attach_popup=True, filterable="advanced", link=(lambda item: dict(action="display_by_username_and_slug", username=item.user.username, slug=item.slug))),
         URLColumn("Public URL"),
         grids.OwnerAnnotationColumn("Annotation", key="annotation", model_annotation_association_class=model.PageAnnotationAssociation, filterable="advanced"),
         grids.IndividualTagsColumn("Tags", key="tags", model_tag_association_class=model.PageTagAssociation, filterable="advanced", grid_name="PageListGrid"),
@@ -45,13 +76,13 @@ class PageListGrid(grids.Grid):
         cols_to_filter=[columns[0], columns[2]],
         key="free-text-search", visible=False, filterable="standard"))
     global_actions = [
-        grids.GridAction("Add new page", dict(action='create'), target="inbound")
+        grids.GridAction("Add new page", dict(controller="", action="pages/create"))
     ]
     operations = [
         grids.DisplayByUsernameAndSlugGridOperation("View", allow_multiple=False),
-        grids.GridOperation("Edit content", allow_multiple=False, url_args=dict(action='edit_content')),
-        grids.GridOperation("Edit attributes", allow_multiple=False, url_args=dict(action='edit')),
-        grids.GridOperation("Share or Publish", allow_multiple=False, condition=(lambda item: not item.deleted), url_args=dict(action='sharing')),
+        grids.GridOperation("Edit content", allow_multiple=False, url_args=dict(action="edit_content")),
+        grids.GridOperation("Edit attributes", allow_multiple=False, url_args=dict(controller="", action="pages/edit")),
+        grids.GridOperation("Share or Publish", allow_multiple=False, condition=(lambda item: not item.deleted), url_args=dict(controller="", action="pages/sharing")),
         grids.GridOperation("Delete", confirm="Are you sure you want to delete this page?"),
     ]
 
@@ -62,7 +93,6 @@ class PageListGrid(grids.Grid):
 class PageAllPublishedGrid(grids.Grid):
     # Grid definition
     use_panels = True
-    use_async = True
     title = "Published Pages"
     model_class = model.Page
     default_sort_key = "update_time"
@@ -83,8 +113,8 @@ class PageAllPublishedGrid(grids.Grid):
     )
 
     def build_initial_query(self, trans, **kwargs):
-        # Join so that searching history.user makes sense.
-        return trans.sa_session.query(self.model_class).join(model.User.table)
+        # See optimization description comments and TODO for tags in matching public histories query.
+        return trans.sa_session.query(self.model_class).join("user").options(eagerload("user").load_only("username"), eagerload("annotations"), undefer("average_rating"))
 
     def apply_query_filter(self, trans, query, **kwargs):
         return query.filter(self.model_class.deleted == false()).filter(self.model_class.published == true())
@@ -104,7 +134,6 @@ class ItemSelectionGrid(grids.Grid):
     show_item_checkboxes = True
     default_filter = {"deleted": "False", "sharing": "All"}
     default_sort_key = "-update_time"
-    use_async = True
     use_paging = True
     num_rows_per_page = 10
 
@@ -224,70 +253,7 @@ class VisualizationSelectionGrid(ItemSelectionGrid):
     )
 
 
-class _PageContentProcessor(_BaseHTMLProcessor):
-    """ Processes page content to produce HTML that is suitable for display. For now, processor renders embedded objects. """
-
-    def __init__(self, trans, encoding, type, render_embed_html_fn):
-        _BaseHTMLProcessor.__init__(self, encoding, type)
-        self.trans = trans
-        self.ignore_content = False
-        self.num_open_tags_for_ignore = 0
-        self.render_embed_html_fn = render_embed_html_fn
-
-    def unknown_starttag(self, tag, attrs):
-        """ Called for each start tag; attrs is a list of (attr, value) tuples. """
-
-        # If ignoring content, just increment tag count and ignore.
-        if self.ignore_content:
-            self.num_open_tags_for_ignore += 1
-            return
-
-        # Not ignoring tag; look for embedded content.
-        embedded_item = False
-        for attribute in attrs:
-            if (attribute[0] == "class") and ("embedded-item" in attribute[1].split(" ")):
-                embedded_item = True
-                break
-        # For embedded content, set ignore flag to ignore current content and add new content for embedded item.
-        if embedded_item:
-            # Set processing attributes to ignore content.
-            self.ignore_content = True
-            self.num_open_tags_for_ignore = 1
-
-            # Insert content for embedded element.
-            for attribute in attrs:
-                name = attribute[0]
-                if name == "id":
-                    # ID has form '<class_name>-<encoded_item_id>'
-                    item_class, item_id = attribute[1].split("-")
-                    embed_html = self.render_embed_html_fn(self.trans, item_class, item_id)
-                    self.pieces.append(embed_html)
-            return
-
-        # Default behavior: not ignoring and no embedded content.
-        _BaseHTMLProcessor.unknown_starttag(self, tag, attrs)
-
-    def handle_data(self, text):
-        """ Called for each block of plain text. """
-        if self.ignore_content:
-            return
-        _BaseHTMLProcessor.handle_data(self, text)
-
-    def unknown_endtag(self, tag):
-        """ Called for each end tag. """
-
-        # If ignoring content, see if current tag is the end of content to ignore.
-        if self.ignore_content:
-            self.num_open_tags_for_ignore -= 1
-            if self.num_open_tags_for_ignore == 0:
-                # Done ignoring content.
-                self.ignore_content = False
-            return
-
-        # Default behavior:
-        _BaseHTMLProcessor.unknown_endtag(self, tag)
-
-
+# Adapted from the _BaseHTMLProcessor class of https://github.com/kurtmckee/feedparser
 class PageController(BaseUIController, SharableMixin,
                      UsesStoredWorkflowMixin, UsesVisualizationMixin, UsesItemRatings):
 
@@ -301,9 +267,10 @@ class PageController(BaseUIController, SharableMixin,
 
     def __init__(self, app):
         super(PageController, self).__init__(app)
-        self.history_manager = managers.histories.HistoryManager(app)
-        self.history_serializer = managers.histories.HistorySerializer(self.app)
-        self.hda_manager = managers.hdas.HDAManager(app)
+        self.page_manager = PageManager(app)
+        self.history_manager = HistoryManager(app)
+        self.history_serializer = HistorySerializer(self.app)
+        self.hda_manager = HDAManager(app)
 
     @web.expose
     @web.json
@@ -322,7 +289,6 @@ class PageController(BaseUIController, SharableMixin,
             session.flush()
 
         # Build grid dictionary.
-        kwargs['dict_format'] = True
         grid = self._page_list(trans, *args, **kwargs)
         grid['shared_by_others'] = self._get_shared(trans)
         return grid
@@ -330,7 +296,6 @@ class PageController(BaseUIController, SharableMixin,
     @web.expose
     @web.json
     def list_published(self, trans, *args, **kwargs):
-        kwargs['dict_format'] = True
         grid = self._all_published_list(trans, *args, **kwargs)
         grid['shared_by_others'] = self._get_shared(trans)
         return grid
@@ -348,107 +313,89 @@ class PageController(BaseUIController, SharableMixin,
                  'slug'     : p.page.slug,
                  'title'    : p.page.title} for p in shared_by_others]
 
-    @web.expose
+    @web.legacy_expose_api
     @web.require_login("create pages")
-    def create(self, trans, page_title="", page_slug="", page_annotation=""):
+    def create(self, trans, payload=None, **kwd):
         """
-        Create a new page
+        Create a new page.
         """
-        user = trans.get_user()
-        page_title_err = page_slug_err = page_annotation_err = ""
-        if trans.request.method == "POST":
-            if not page_title:
-                page_title_err = "Page name is required"
-            elif not page_slug:
-                page_slug_err = "Page id is required"
-            elif not self._is_valid_slug(page_slug):
-                page_slug_err = "Page identifier must consist of only lowercase letters, numbers, and the '-' character"
-            elif trans.sa_session.query(model.Page).filter_by(user=user, slug=page_slug, deleted=False).first():
-                page_slug_err = "Page id must be unique"
-            else:
-                # Create the new stored page
-                page = model.Page()
-                page.title = page_title
-                page.slug = page_slug
-                page_annotation = sanitize_html(page_annotation, 'utf-8', 'text/html')
-                self.add_item_annotation(trans.sa_session, trans.get_user(), page, page_annotation)
-                page.user = user
-                # And the first (empty) page revision
-                page_revision = model.PageRevision()
-                page_revision.title = page_title
-                page_revision.page = page
-                page.latest_revision = page_revision
-                page_revision.content = ""
-                # Persist
-                session = trans.sa_session
-                session.add(page)
-                session.flush()
-                # Display the management page
-                # trans.set_message( "Page '%s' created" % page.title )
-                return trans.response.send_redirect(web.url_for(controller='pages', action='list'))
-        return trans.show_form(
-            web.FormBuilder(web.url_for(controller='page', action='create'), "Create new page", submit_text="Submit")
-            .add_text("page_title", "Page title", value=page_title, error=page_title_err)
-            .add_text("page_slug", "Page identifier", value=page_slug, error=page_slug_err,
-                      help="""A unique identifier that will be used for
-                            public links to this page. A default is generated
-                            from the page title, but can be edited. This field
-                            must contain only lowercase letters, numbers, and
-                            the '-' character.""")
-            .add_text("page_annotation", "Page annotation", value=page_annotation, error=page_annotation_err,
-                      help="A description of the page; annotation is shown alongside published pages."),
-            template="page/create.mako")
+        if trans.request.method == 'GET':
+            return {
+                'title'  : 'Create a new page',
+                'inputs' : [{
+                    'name'      : 'title',
+                    'label'     : 'Name'
+                }, {
+                    'name'      : 'slug',
+                    'label'     : 'Identifier',
+                    'help'      : 'A unique identifier that will be used for public links to this page. This field can only contain lowercase letters, numbers, and dashes (-).'
+                }, {
+                    'name'      : 'annotation',
+                    'label'     : 'Annotation',
+                    'help'      : 'A description of the page. The annotation is shown alongside published pages.'
+                }]
+            }
+        else:
+            try:
+                page = self.page_manager.create(trans, payload)
+            except exceptions.MessageException as e:
+                return self.message_exception(trans, unicodify(e))
+            return {'message': 'Page \'%s\' successfully created.' % page.title, 'status': 'success'}
 
-    @web.expose
+    @web.legacy_expose_api
     @web.require_login("edit pages")
-    def edit(self, trans, id, page_title="", page_slug="", page_annotation=""):
+    def edit(self, trans, payload=None, **kwd):
         """
         Edit a page's attributes.
         """
-        encoded_id = id
-        id = self.decode_id(id)
-        session = trans.sa_session
-        page = session.query(model.Page).get(id)
-        user = trans.user
-        assert page.user == user
-        page_title_err = page_slug_err = page_annotation_err = ""
-        if trans.request.method == "POST":
-            if not page_title:
-                page_title_err = "Page name is required"
-            elif not page_slug:
-                page_slug_err = "Page id is required"
-            elif not self._is_valid_slug(page_slug):
-                page_slug_err = "Page identifier must consist of only lowercase letters, numbers, and the '-' character"
-            elif page_slug != page.slug and trans.sa_session.query(model.Page).filter_by(user=user, slug=page_slug, deleted=False).first():
-                page_slug_err = "Page id must be unique"
-            elif not page_annotation:
-                page_annotation_err = "Page annotation is required"
-            else:
-                page.title = page_title
-                page.slug = page_slug
-                page_annotation = sanitize_html(page_annotation, 'utf-8', 'text/html')
-                self.add_item_annotation(trans.sa_session, trans.get_user(), page, page_annotation)
-                session.flush()
-                # Redirect to page list.
-                return trans.response.send_redirect(web.url_for(controller='pages', action='list'))
+        id = kwd.get('id')
+        if not id:
+            return self.message_exception(trans, 'No page id received for editing.')
+        decoded_id = self.decode_id(id)
+        user = trans.get_user()
+        p = trans.sa_session.query(model.Page).get(decoded_id)
+        if trans.request.method == 'GET':
+            if p.slug is None:
+                self.create_item_slug(trans.sa_session, p)
+            return {
+                'title'  : 'Edit page attributes',
+                'inputs' : [{
+                    'name'      : 'title',
+                    'label'     : 'Name',
+                    'value'     : p.title
+                }, {
+                    'name'      : 'slug',
+                    'label'     : 'Identifier',
+                    'value'     : p.slug,
+                    'help'      : 'A unique identifier that will be used for public links to this page. This field can only contain lowercase letters, numbers, and dashes (-).'
+                }, {
+                    'name'      : 'annotation',
+                    'label'     : 'Annotation',
+                    'value'     : self.get_item_annotation_str(trans.sa_session, user, p),
+                    'help'      : 'A description of the page. The annotation is shown alongside published pages.'
+                }]
+            }
         else:
-            page_title = page.title
-            page_slug = page.slug
-            page_annotation = self.get_item_annotation_str(trans.sa_session, trans.user, page)
-            if not page_annotation:
-                page_annotation = ""
-        return trans.show_form(
-            web.FormBuilder(web.url_for(controller='page', action='edit', id=encoded_id), "Edit page attributes", submit_text="Submit")
-            .add_text("page_title", "Page title", value=page_title, error=page_title_err)
-            .add_text("page_slug", "Page identifier", value=page_slug, error=page_slug_err,
-                      help="""A unique identifier that will be used for
-                       public links to this page. A default is generated
-                       from the page title, but can be edited. This field
-                       must contain only lowercase letters, numbers, and
-                       the '-' character.""")
-            .add_text("page_annotation", "Page annotation", value=page_annotation, error=page_annotation_err,
-                      help="A description of the page; annotation is shown alongside published pages."),
-            template="page/create.mako")
+            p_title = payload.get('title')
+            p_slug = payload.get('slug')
+            p_annotation = payload.get('annotation')
+            if not p_title:
+                return self.message_exception(trans, 'Please provide a page name is required.')
+            elif not p_slug:
+                return self.message_exception(trans, 'Please provide a unique identifier.')
+            elif not self._is_valid_slug(p_slug):
+                return self.message_exception(trans, 'Page identifier can only contain lowercase letters, numbers, and dashes (-).')
+            elif p_slug != p.slug and trans.sa_session.query(model.Page).filter_by(user=p.user, slug=p_slug, deleted=False).first():
+                return self.message_exception(trans, 'Page id must be unique.')
+            else:
+                p.title = p_title
+                p.slug = p_slug
+                if p_annotation:
+                    p_annotation = sanitize_html(p_annotation)
+                    self.add_item_annotation(trans.sa_session, user, p, p_annotation)
+                trans.sa_session.add(p)
+                trans.sa_session.flush()
+            return {'message': 'Attributes of \'%s\' successfully saved.' % p.title, 'status': 'success'}
 
     @web.expose
     @web.require_login("edit pages")
@@ -460,42 +407,6 @@ class PageController(BaseUIController, SharableMixin,
         page = trans.sa_session.query(model.Page).get(id)
         assert page.user == trans.user
         return trans.fill_template("page/editor.mako", page=page)
-
-    @web.expose
-    @web.require_login("use Galaxy pages")
-    def sharing(self, trans, id, **kwargs):
-        """ Handle page sharing. """
-
-        # Get session and page.
-        session = trans.sa_session
-        page = trans.sa_session.query(model.Page).get(self.decode_id(id))
-
-        # Do operation on page.
-        if 'make_accessible_via_link' in kwargs:
-            self._make_item_accessible(trans.sa_session, page)
-        elif 'make_accessible_and_publish' in kwargs:
-            self._make_item_accessible(trans.sa_session, page)
-            page.published = True
-        elif 'publish' in kwargs:
-            page.published = True
-        elif 'disable_link_access' in kwargs:
-            page.importable = False
-        elif 'unpublish' in kwargs:
-            page.published = False
-        elif 'disable_link_access_and_unpublish' in kwargs:
-            page.importable = page.published = False
-        elif 'unshare_user' in kwargs:
-            user = session.query(model.User).get(self.decode_id(kwargs['unshare_user']))
-            if not user:
-                error("User not found for provided id")
-            association = session.query(model.PageUserShareAssociation) \
-                                 .filter_by(user=user, page=page).one()
-            session.delete(association)
-
-        session.flush()
-
-        return trans.fill_template("/sharing_base.mako",
-                                   item=page, controller_list='pages', use_panels=True)
 
     @web.expose
     @web.require_login("use Galaxy pages")
@@ -529,7 +440,7 @@ class PageController(BaseUIController, SharableMixin,
                 page_title = escape(page.title)
                 other_email = escape(other.email)
                 trans.set_message("Page '%s' shared with user '%s'" % (page_title, other_email))
-                return trans.response.send_redirect(url_for(controller='page', action='sharing', id=id))
+                return trans.response.send_redirect(url_for("/pages/sharing?id=%s" % id))
         return trans.fill_template("/ind_share_base.mako",
                                    message=msg,
                                    messagetype=mtype,
@@ -539,53 +450,11 @@ class PageController(BaseUIController, SharableMixin,
 
     @web.expose
     @web.require_login()
-    def save(self, trans, id, content, annotations):
+    def save(self, trans, id, content):
         id = self.decode_id(id)
         page = trans.sa_session.query(model.Page).get(id)
         assert page.user == trans.user
-
-        # Sanitize content
-        content = sanitize_html(content, 'utf-8', 'text/html')
-
-        # Add a new revision to the page with the provided content.
-        page_revision = model.PageRevision()
-        page_revision.title = page.title
-        page_revision.page = page
-        page.latest_revision = page_revision
-        page_revision.content = content
-
-        # Save annotations.
-        annotations = loads(annotations)
-        for annotation_dict in annotations:
-            item_id = self.decode_id(annotation_dict['item_id'])
-            item_class = self.get_class(annotation_dict['item_class'])
-            item = trans.sa_session.query(item_class).filter_by(id=item_id).first()
-            if not item:
-                raise RuntimeError("cannot find annotated item")
-            text = sanitize_html(annotation_dict['text'], 'utf-8', 'text/html')
-
-            # Add/update annotation.
-            if item_id and item_class and text:
-                # Get annotation association.
-                annotation_assoc_class = eval("model.%sAnnotationAssociation" % item_class.__name__)
-                annotation_assoc = trans.sa_session.query(annotation_assoc_class).filter_by(user=trans.get_user())
-                if item_class == model.History.__class__:
-                    annotation_assoc = annotation_assoc.filter_by(history=item)
-                elif item_class == model.HistoryDatasetAssociation.__class__:
-                    annotation_assoc = annotation_assoc.filter_by(hda=item)
-                elif item_class == model.StoredWorkflow.__class__:
-                    annotation_assoc = annotation_assoc.filter_by(stored_workflow=item)
-                elif item_class == model.WorkflowStep.__class__:
-                    annotation_assoc = annotation_assoc.filter_by(workflow_step=item)
-                annotation_assoc = annotation_assoc.first()
-                if not annotation_assoc:
-                    # Create association.
-                    annotation_assoc = annotation_assoc_class()
-                    item.annotations.append(annotation_assoc)
-                    annotation_assoc.user = trans.get_user()
-                # Set annotation user text.
-                annotation_assoc.annotation = text
-        trans.sa_session.flush()
+        self.page_manager.save_new_revision(trans, page, {"content": content})
 
     @web.expose
     @web.require_login()
@@ -610,8 +479,10 @@ class PageController(BaseUIController, SharableMixin,
         self.security_check(trans, page, False, True)
 
         # Process page content.
-        processor = _PageContentProcessor(trans, 'utf-8', 'text/html', self._get_embed_html)
+        processor = PageContentProcessor(trans, self._get_embed_html)
         processor.feed(page.latest_revision.content)
+        # Output is string, so convert to unicode for display.
+        page_content = unicodify(processor.output(), 'utf-8')
 
         # Get rating data.
         user_item_rating = 0
@@ -623,8 +494,6 @@ class PageController(BaseUIController, SharableMixin,
                 user_item_rating = 0
         ave_item_rating, num_ratings = self.get_ave_item_rating_data(trans.sa_session, page)
 
-        # Output is string, so convert to unicode for display.
-        page_content = unicodify(processor.output(), 'utf-8')
         return trans.fill_template_mako("page/display.mako", item=page,
                                         item_data=page_content,
                                         user_item_rating=user_item_rating,
@@ -692,7 +561,6 @@ class PageController(BaseUIController, SharableMixin,
     @web.require_login("select a history from saved histories")
     def list_histories_for_selection(self, trans, **kwargs):
         """ Returns HTML that enables a user to select one or more histories. """
-        kwargs['dict_format'] = True
         return self._history_selection_grid(trans, **kwargs)
 
     @web.expose
@@ -700,7 +568,6 @@ class PageController(BaseUIController, SharableMixin,
     @web.require_login("select a workflow from saved workflows")
     def list_workflows_for_selection(self, trans, **kwargs):
         """ Returns HTML that enables a user to select one or more workflows. """
-        kwargs['dict_format'] = True
         return self._workflow_selection_grid(trans, **kwargs)
 
     @web.expose
@@ -708,7 +575,6 @@ class PageController(BaseUIController, SharableMixin,
     @web.require_login("select a visualization from saved visualizations")
     def list_visualizations_for_selection(self, trans, **kwargs):
         """ Returns HTML that enables a user to select one or more visualizations. """
-        kwargs['dict_format'] = True
         return self._visualization_selection_grid(trans, **kwargs)
 
     @web.expose
@@ -716,7 +582,6 @@ class PageController(BaseUIController, SharableMixin,
     @web.require_login("select a page from saved pages")
     def list_pages_for_selection(self, trans, **kwargs):
         """ Returns HTML that enables a user to select one or more pages. """
-        kwargs['dict_format'] = True
         return self._page_selection_grid(trans, **kwargs)
 
     @web.expose
@@ -724,7 +589,6 @@ class PageController(BaseUIController, SharableMixin,
     @web.require_login("select a dataset from saved datasets")
     def list_datasets_for_selection(self, trans, **kwargs):
         """ Returns HTML that enables a user to select one or more datasets. """
-        kwargs['dict_format'] = True
         return self._datasets_selection_grid(trans, **kwargs)
 
     @web.expose
@@ -745,12 +609,10 @@ class PageController(BaseUIController, SharableMixin,
     def get_item(self, trans, id):
         return self.get_page(trans, id)
 
-    def _get_embedded_history_html(self, trans, id):
+    def _get_embedded_history_html(self, trans, decoded_id):
         """
         Returns html suitable for embedding in another page.
         """
-        # TODO: should be moved to history controller and/or called via ajax from the template
-        decoded_id = self.decode_id(id)
         # histories embedded in pages are set to importable when embedded, check for access here
         history = self.history_manager.get_accessible(decoded_id, trans.user, current_history=trans.history)
 
@@ -773,11 +635,11 @@ class PageController(BaseUIController, SharableMixin,
                                      content_dicts=contents)
         return filled
 
-    def _get_embedded_visualization_html(self, trans, id):
+    def _get_embedded_visualization_html(self, trans, encoded_id):
         """
         Returns html suitable for embedding visualizations in another page.
         """
-        visualization = self.get_visualization(trans, id, False, True)
+        visualization = self.get_visualization(trans, encoded_id, False, True)
         visualization.annotation = self.get_item_annotation_str(trans.sa_session, visualization.user, visualization)
         if not visualization:
             return None
@@ -799,11 +661,11 @@ class PageController(BaseUIController, SharableMixin,
     def _get_embed_html(self, trans, item_class, item_id):
         """ Returns HTML for embedding an item in a page. """
         item_class = self.get_class(item_class)
+        encoded_id, decoded_id = get_page_identifiers(item_id, trans.app)
         if item_class == model.History:
-            return self._get_embedded_history_html(trans, item_id)
+            return self._get_embedded_history_html(trans, decoded_id)
 
         elif item_class == model.HistoryDatasetAssociation:
-            decoded_id = self.decode_id(item_id)
             dataset = self.hda_manager.get_accessible(decoded_id, trans.user)
             dataset = self.hda_manager.error_if_uploading(dataset)
 
@@ -813,14 +675,14 @@ class PageController(BaseUIController, SharableMixin,
                 return trans.fill_template("dataset/embed.mako", item=dataset, item_data=data)
 
         elif item_class == model.StoredWorkflow:
-            workflow = self.get_stored_workflow(trans, item_id, False, True)
+            workflow = self.get_stored_workflow(trans, encoded_id, False, True)
             workflow.annotation = self.get_item_annotation_str(trans.sa_session, workflow.user, workflow)
             if workflow:
                 self.get_stored_workflow_steps(trans, workflow)
                 return trans.fill_template("workflow/embed.mako", item=workflow, item_data=workflow.latest_workflow.steps)
 
         elif item_class == model.Visualization:
-            return self._get_embedded_visualization_html(trans, item_id)
+            return self._get_embedded_visualization_html(trans, encoded_id)
 
         elif item_class == model.Page:
             pass

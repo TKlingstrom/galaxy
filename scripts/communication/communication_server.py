@@ -49,22 +49,26 @@ from flask_socketio import (
 
 sys.path.insert(1, os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir, 'lib')))
 
-from galaxy.model import mapping
-from galaxy.model.orm.scripts import get_config
-from galaxy.util.properties import load_app_properties
+import galaxy.config
+from galaxy.security.idencoding import IdEncodingHelper
 from galaxy.util.sanitize_html import sanitize_html
-from galaxy.web.security import SecurityHelper
+from galaxy.util.script import app_properties_from_args, populate_config_args
 
 logging.basicConfig()
 log = logging.getLogger(__name__)
 
-# Get config file and load up SA session
-config = get_config(sys.argv)
-model = mapping.init('/tmp/', config['db_url'])
-sa_session = model.context.current
+parser = argparse.ArgumentParser(description='Real-time communication server for Galaxy.')
+parser.add_argument('--port', type=int, default="7070", help='Port number on which the server should run.')
+parser.add_argument('--host', default='localhost', help='Hostname of the communication server.')
+populate_config_args(parser)
+args = parser.parse_args()
 
 # With the config file we can load the full app properties
-app_properties = load_app_properties(ini_file=config['config_file'])
+app_properties = app_properties_from_args(args)
+
+config = galaxy.config.Configuration(**app_properties)
+model = galaxy.config.init_models_from_config(config)
+sa_session = model.context.current
 
 # We need the ID secret for configuring the security helper to decrypt
 # galaxysession cookies.
@@ -73,7 +77,7 @@ if "id_secret" not in app_properties:
 
 id_secret = app_properties.get('id_secret', 'dangerous_default')
 
-security_helper = SecurityHelper(id_secret=id_secret)
+security_helper = IdEncodingHelper(id_secret=id_secret)
 # And get access to the models
 # Login manager to manage current_user functionality
 login_manager = flask_login.LoginManager()
@@ -217,9 +221,4 @@ def leave(message):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Real-time communication server for Galaxy.')
-    parser.add_argument('--port', type=int, default="7070", help='Port number on which the server should run.')
-    parser.add_argument('--host', default='localhost', help='Hostname of the communication server.')
-
-    args = parser.parse_args()
     socketio.run(app, host=args.host, port=args.port)

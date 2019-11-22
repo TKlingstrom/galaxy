@@ -6,6 +6,7 @@ users to configure data tables for a local Galaxy instance without needing
 to modify the tool configurations.
 """
 
+import errno
 import hashlib
 import logging
 import os
@@ -13,18 +14,25 @@ import os.path
 import re
 import string
 import time
+from collections import OrderedDict
 from glob import glob
 from tempfile import NamedTemporaryFile
+from xml.etree import ElementTree
 
-from six.moves.urllib.request import urlopen
+import requests
 
 from galaxy import util
 from galaxy.util.dictifiable import Dictifiable
-from galaxy.util.odict import odict
+from galaxy.util.renamed_temporary_file import RenamedTemporaryFile
 
 log = logging.getLogger(__name__)
 
 DEFAULT_TABLE_TYPE = 'tabular'
+
+TOOL_DATA_TABLE_CONF_XML = """<?xml version="1.0"?>
+<tables>
+</tables>
+"""
 
 
 class ToolDataPathFiles(object):
@@ -52,16 +60,14 @@ class ToolDataPathFiles(object):
         path = os.path.abspath(path)
         if path in self.tool_data_path_files:
             return True
-        elif self.tool_data_path not in path:
-            return os.path.exists(path)
         else:
-            return False
+            return os.path.exists(path)
 
 
 class ToolDataTableManager(object):
     """Manages a collection of tool data tables"""
 
-    def __init__(self, tool_data_path, config_filename=None):
+    def __init__(self, tool_data_path, config_filename=None, tool_data_table_config_path_set=None):
         self.tool_data_path = tool_data_path
         # This stores all defined data table entries from both the tool_data_table_conf.xml file and the shed_tool_data_table_conf.xml file
         # at server startup. If tool shed repositories are installed that contain a valid file named tool_data_table_conf.xml.sample, entries
@@ -150,8 +156,8 @@ class ToolDataTableManager(object):
                                                      tool_data_path=tool_data_path,
                                                      from_shed_config=True)
         except Exception as e:
-            error_message = 'Error attempting to parse file %s: %s' % (str(os.path.split(config_filename)[1]), str(e))
-            log.debug(error_message)
+            error_message = 'Error attempting to parse file %s: %s' % (str(os.path.split(config_filename)[1]), util.unicodify(e))
+            log.debug(error_message, exc_info=True)
             table_elems = []
         if persist:
             # Persist Galaxy's version of the changed tool_data_table_conf.xml file.
@@ -173,7 +179,15 @@ class ToolDataTableManager(object):
         full_path = os.path.abspath(shed_tool_data_table_config)
         # FIXME: we should lock changing this file by other threads / head nodes
         try:
-            tree = util.parse_xml(full_path)
+            try:
+                tree = util.parse_xml(full_path)
+            except (OSError, IOError) as e:
+                if e.errno == errno.ENOENT:
+                    with open(full_path, 'w') as fh:
+                        fh.write(TOOL_DATA_TABLE_CONF_XML)
+                    tree = util.parse_xml(full_path)
+                else:
+                    raise
             root = tree.getroot()
             out_elems = [elem for elem in root]
         except Exception as e:
@@ -186,11 +200,12 @@ class ToolDataTableManager(object):
         # add new elems
         out_elems.extend(new_elems)
         out_path_is_new = not os.path.exists(full_path)
-        with open(full_path, 'wb') as out:
-            out.write('<?xml version="1.0"?>\n<tables>\n')
-            for elem in out_elems:
-                out.write(util.xml_to_string(elem, pretty=True))
-            out.write('</tables>\n')
+
+        root = ElementTree.fromstring('<?xml version="1.0"?>\n<tables></tables>')
+        for elem in out_elems:
+            root.append(elem)
+        with RenamedTemporaryFile(full_path, mode='w') as out:
+            out.write(util.xml_to_string(root, pretty=True))
         os.chmod(full_path, 0o644)
         if out_path_is_new:
             self.tool_data_path_files.update_files()
@@ -236,7 +251,7 @@ class ToolDataTable(object):
         self.empty_field_values = {}
         self.allow_duplicate_entries = util.asbool(config_element.get('allow_duplicate_entries', True))
         self.here = filename and os.path.dirname(filename)
-        self.filenames = odict()
+        self.filenames = OrderedDict()
         self.tool_data_path = tool_data_path
         self.tool_data_path_files = tool_data_path_files
         self.missing_index_file = None
@@ -264,9 +279,8 @@ class ToolDataTable(object):
         return self._update_version()
 
     def add_entries(self, entries, allow_duplicates=True, persist=False, persist_on_error=False, entry_source=None, **kwd):
-        if entries:
-            for entry in entries:
-                self.add_entry(entry, allow_duplicates=allow_duplicates, persist=persist, persist_on_error=persist_on_error, entry_source=entry_source, **kwd)
+        for entry in entries:
+            self.add_entry(entry, allow_duplicates=allow_duplicates, persist=persist, persist_on_error=persist_on_error, entry_source=entry_source, **kwd)
         return self._loaded_content_version
 
     def _remove_entry(self, values):
@@ -340,7 +354,7 @@ class TabularToolDataTable(ToolDataTable, Dictifiable):
                 if filename:
                     tmp_file = NamedTemporaryFile(prefix='TTDT_URL_%s-' % self.name)
                     try:
-                        tmp_file.write(urlopen(filename, timeout=url_timeout).read())
+                        tmp_file.write(requests.get(filename, timeout=url_timeout).text)
                     except Exception as e:
                         log.error('Error loading Data Table URL "%s": %s', filename, e)
                         continue
@@ -368,20 +382,20 @@ class TabularToolDataTable(ToolDataTable, Dictifiable):
                 filename = os.path.join(tool_data_path, filename)
             if self.tool_data_path_files.exists(filename):
                 found = True
-            elif self.tool_data_path_files.exists("%s.sample" % filename) and not from_shed_config:
-                log.info("Could not find tool data %s, reading sample" % filename)
-                filename = "%s.sample" % filename
-                found = True
             else:
                 # Since the path attribute can include a hard-coded path to a specific directory
                 # (e.g., <file path="tool-data/cg_crr_files.loc" />) which may not be the same value
                 # as self.tool_data_path, we'll parse the path to get the filename and see if it is
                 # in self.tool_data_path.
                 file_path, file_name = os.path.split(filename)
-                if file_path and file_path != self.tool_data_path:
+                if file_path != self.tool_data_path:
                     corrected_filename = os.path.join(self.tool_data_path, file_name)
                     if self.tool_data_path_files.exists(corrected_filename):
                         filename = corrected_filename
+                        found = True
+                    elif not from_shed_config and self.tool_data_path_files.exists("%s.sample" % corrected_filename):
+                        log.info("Could not find tool data %s, reading sample" % corrected_filename)
+                        filename = "%s.sample" % corrected_filename
                         found = True
 
             errors = []
@@ -390,6 +404,12 @@ class TabularToolDataTable(ToolDataTable, Dictifiable):
                 self._update_version()
             else:
                 self.missing_index_file = filename
+                # TODO: some data tables need to exist (even if they are empty)
+                # for tools to load. In an installed Galaxy environment and the
+                # default tool_data_table_conf.xml, this will emit spurious
+                # warnings about missing location files that would otherwise be
+                # empty and we don't care about unless the admin chooses to
+                # populate them.
                 log.warning("Cannot find index file '%s' for tool data table '%s'" % (filename, self.name))
 
             if filename not in self.filenames or not self.filenames[filename]['found']:
@@ -600,7 +620,7 @@ class TabularToolDataTable(ToolDataTable, Dictifiable):
         is_error = False
         if self.largest_index < len(fields):
             fields = self._replace_field_separators(fields)
-            if fields not in self.get_fields() or (allow_duplicates and self.allow_duplicate_entries):
+            if (allow_duplicates and self.allow_duplicate_entries) or fields not in self.get_fields():
                 self.data.append(fields)
             else:
                 log.debug("Attempted to add fields (%s) to data table '%s', but this entry already exists and allow_duplicates is False.", fields, self.name)
@@ -624,13 +644,14 @@ class TabularToolDataTable(ToolDataTable, Dictifiable):
                 except IOError as e:
                     log.warning('Error opening data table file (%s) with r+b, assuming file does not exist and will open as wb: %s', filename, e)
                     data_table_fh = open(filename, 'wb')
-                if os.stat(filename)[6] != 0:
+                if os.stat(filename).st_size != 0:
                     # ensure last existing line ends with new line
                     data_table_fh.seek(-1, 2)  # last char in file
                     last_char = data_table_fh.read(1)
-                    if last_char not in ['\n', '\r']:
-                        data_table_fh.write('\n')
-                data_table_fh.write("%s\n" % (self.separator.join(fields)))
+                    if last_char not in [b'\n', b'\r']:
+                        data_table_fh.write(b'\n')
+                fields = "%s\n" % self.separator.join(fields)
+                data_table_fh.write(fields.encode('utf-8'))
         return not is_error
 
     def _remove_entry(self, values):
@@ -662,7 +683,7 @@ class TabularToolDataTable(ToolDataTable, Dictifiable):
                         if fields != values:
                             rval += line
 
-        with open(loc_file, 'wb') as writer:
+        with open(loc_file, 'w') as writer:
             writer.write(rval)
 
         return rval
@@ -689,14 +710,14 @@ class TabularToolDataTable(ToolDataTable, Dictifiable):
     def _deduplicate_data(self):
         # Remove duplicate entries, without recreating self.data object
         dup_lines = []
-        hash_list = []
+        hash_set = set()
         for i, fields in enumerate(self.data):
             fields_hash = hash(self.separator.join(fields))
-            if fields_hash in hash_list:
+            if fields_hash in hash_set:
                 dup_lines.append(i)
                 log.debug('Found duplicate entry in tool data table "%s", but duplicates are not allowed, removing additional entry for: "%s"', self.name, fields)
             else:
-                hash_list.append(fields_hash)
+                hash_set.add(fields_hash)
         for i in reversed(dup_lines):
             self.data.pop(i)
 
@@ -712,7 +733,7 @@ class TabularToolDataTable(ToolDataTable, Dictifiable):
         return rval
 
 
-class TabularToolDataField(Dictifiable, object):
+class TabularToolDataField(Dictifiable):
 
     dict_collection_visible_keys = []
 
@@ -750,8 +771,8 @@ class TabularToolDataField(Dictifiable, object):
         sha1 = hashlib.sha1()
         fmap = self.get_filesize_map(True)
         for k in sorted(fmap.keys()):
-            sha1.update(k)
-            sha1.update(str(fmap[k]))
+            sha1.update(util.smart_str(k))
+            sha1.update(util.smart_str(fmap[k]))
         return sha1.hexdigest()
 
     def to_dict(self):

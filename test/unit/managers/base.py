@@ -3,18 +3,13 @@
 from __future__ import print_function
 
 import json
-import os
-import sys
 import unittest
 
 import sqlalchemy
 from six import string_types
 
 from galaxy.managers.users import UserManager
-
-unit_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-sys.path.insert(1, unit_root)
-from unittest_utils import galaxy_mock
+from ..unittest_utils import galaxy_mock
 
 # =============================================================================
 admin_email = 'admin@admin.admin'
@@ -43,8 +38,14 @@ class BaseTestCase(unittest.TestCase):
         self.set_up_trans()
 
     def set_up_mocks(self):
-        self.trans = galaxy_mock.MockTrans(admin_users=admin_users)
+        admin_users_list = [u for u in admin_users.split(',') if u]
+        self.trans = galaxy_mock.MockTrans(admin_users=admin_users, admin_users_list=admin_users_list)
         self.app = self.trans.app
+
+        def mock_is_admin_user(user):
+            return user.email in admin_users
+
+        self.trans.app.config.is_admin_user = mock_is_admin_user
 
     def set_up_managers(self):
         self.user_manager = UserManager(self.app)
@@ -105,14 +106,18 @@ class BaseTestCase(unittest.TestCase):
         self.assertTrue(True, 'is uuid: ' + item)
 
     def assertORMFilter(self, item, msg=None):
-        if not isinstance(item, sqlalchemy.sql.elements.BinaryExpression):
-            self.fail('Not an orm filter: ' + str(type(item)))
-        self.assertTrue(True, msg or ('is an orm filter: ' + str(item)))
+        if not isinstance(item.filter, (sqlalchemy.sql.elements.BinaryExpression, sqlalchemy.sql.elements.BooleanClauseList)):
+            self.fail('Not an orm filter: ' + str(type(item.filter)))
+        self.assertTrue(True, msg or ('is an orm filter: ' + str(item.filter)))
+
+    def assertORMFunctionFilter(self, item, msg=None):
+        assert item.filter_type == 'orm_function'
+        assert callable(item.filter)
 
     def assertFnFilter(self, item, msg=None):
-        if not item or not callable(item):
-            self.fail('Not a fn filter: ' + str(type(item)))
-        self.assertTrue(True, msg or ('is a fn filter: ' + str(item)))
+        if not item.filter or not callable(item.filter):
+            self.fail('Not a fn filter: ' + str(type(item.filter)))
+        self.assertTrue(True, msg or ('is a fn filter: ' + str(item.filter)))
 
     def assertIsJsonifyable(self, item):
         # TODO: use galaxy's override

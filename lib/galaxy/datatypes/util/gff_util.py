@@ -2,13 +2,14 @@
 Provides utilities for working with GFF files.
 """
 import copy
+from collections import OrderedDict
 
 from bx.intervals.io import GenomicInterval, GenomicIntervalReader, MissingFieldError, NiceReaderWrapper, ParseError
 from bx.tabular.io import Comment, Header
 
-from six import Iterator
+from galaxy.util import unicodify
 
-from galaxy.util.odict import odict
+FASTA_DIRECTIVE = '##FASTA'
 
 
 class GFFInterval(GenomicInterval):
@@ -33,15 +34,17 @@ class GFFInterval(GenomicInterval):
 
         # Handle feature, score column.
         self.feature_col = feature_col
-        if self.feature_col >= self.nfields:
+        if self.nfields <= self.feature_col:
             raise MissingFieldError("No field for feature_col (%d)" % feature_col)
         self.feature = self.fields[self.feature_col]
         self.score_col = score_col
-        if self.score_col >= self.nfields:
+        if self.nfields <= self.score_col:
             raise MissingFieldError("No field for score_col (%d)" % score_col)
         self.score = self.fields[self.score_col]
 
         # GFF attributes.
+        if self.nfields < 9:
+            raise MissingFieldError("No field for attribute column (8)")
         self.attributes = parse_gff_attributes(fields[8])
 
     def copy(self):
@@ -121,7 +124,7 @@ class GFFIntervalToBEDReaderWrapper(NiceReaderWrapper):
         return interval
 
 
-class GFFReaderWrapper(Iterator, NiceReaderWrapper):  # Iterator can be removed after bx-python library is ported to Python3
+class GFFReaderWrapper(NiceReaderWrapper):
     """
     Reader wrapper for GFF files.
 
@@ -146,6 +149,7 @@ class GFFReaderWrapper(Iterator, NiceReaderWrapper):  # Iterator can be removed 
         self.cur_offset = 0
         self.seed_interval = None
         self.seed_interval_line_len = 0
+        self.__end_of_intervals = False
 
     def parse_row(self, line):
         interval = GFFInterval(self, line.split("\t"), self.chrom_col, self.feature_col,
@@ -168,7 +172,7 @@ class GFFReaderWrapper(Iterator, NiceReaderWrapper):  # Iterator can be removed 
             self.skipped += 1
             # no reason to stuff an entire bad file into memmory
             if self.skipped < 10:
-                self.skipped_lines.append((self.linenum, self.current_line, str(e)))
+                self.skipped_lines.append((self.linenum, self.current_line, unicodify(e)))
 
             # For debugging, uncomment this to propogate parsing exceptions up.
             # I.e. the underlying reason for an unexpected StopIteration exception
@@ -178,6 +182,8 @@ class GFFReaderWrapper(Iterator, NiceReaderWrapper):  # Iterator can be removed 
         #
         # Get next GFFFeature
         #
+        if self.__end_of_intervals:
+            raise StopIteration("End of Intervals")
         raw_size = self.seed_interval_line_len
 
         # If there is no seed interval, set one. Also, if there are no more
@@ -185,7 +191,7 @@ class GFFReaderWrapper(Iterator, NiceReaderWrapper):  # Iterator can be removed 
         if not self.seed_interval:
             while not self.seed_interval:
                 try:
-                    self.seed_interval = GenomicIntervalReader.next(self)
+                    self.seed_interval = super(GenomicIntervalReader, self).__next__()
                 except ParseError as e:
                     handle_parse_error(e)
                 # TODO: When no longer supporting python 2.4 use finally:
@@ -212,9 +218,9 @@ class GFFReaderWrapper(Iterator, NiceReaderWrapper):  # Iterator can be removed 
         feature_intervals.append(self.seed_interval)
         while True:
             try:
-                interval = GenomicIntervalReader.next(self)
+                interval = super(GenomicIntervalReader, self).__next__()
                 raw_size += len(self.current_line)
-            except StopIteration as e:
+            except StopIteration:
                 # No more intervals to read, but last feature needs to be
                 # returned.
                 interval = None
@@ -230,6 +236,9 @@ class GFFReaderWrapper(Iterator, NiceReaderWrapper):  # Iterator can be removed 
 
             # Ignore comments.
             if isinstance(interval, Comment):
+                if self.current_line.rstrip() == FASTA_DIRECTIVE:
+                    self.__end_of_intervals = True
+                    break
                 continue
 
             # Determine if interval is part of feature.
@@ -418,7 +427,7 @@ def read_unordered_gtf(iterator, strict=False):
             return fields[0] + '_' + get_transcript_id(fields)
 
     # Aggregate intervals by transcript_id and collect comments.
-    feature_intervals = odict()
+    feature_intervals = OrderedDict()
     comments = []
     for count, line in enumerate(iterator):
         if line.startswith('#'):

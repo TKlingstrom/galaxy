@@ -3,7 +3,7 @@ import tempfile
 from xml.etree.ElementTree import XML
 
 from galaxy.datatypes.metadata import MetadataSpecCollection
-from galaxy.jobs.datasets import DatasetPath
+from galaxy.job_execution.datasets import DatasetPath
 from galaxy.tools.parameters.basic import (
     DrillDownSelectToolParameter,
     IntegerToolParameter,
@@ -69,7 +69,8 @@ def test_select_wrapper_multiple(tool):
 @with_mock_tool
 def test_select_wrapper_with_path_rewritting(tool):
     parameter = _setup_blast_tool(tool, multiple=True)
-    wrapper = SelectToolParameterWrapper(parameter, ["val1", "val2"], other_values={}, path_rewriter=lambda v: "Rewrite<%s>" % v)
+    compute_environment = MockComputeEnvironment(None)
+    wrapper = SelectToolParameterWrapper(parameter, ["val1", "val2"], other_values={}, compute_environment=compute_environment)
     assert wrapper.fields.path == "Rewrite<path1>,Rewrite<path2>"
 
 
@@ -85,9 +86,15 @@ def test_raw_object_wrapper():
 
 @with_mock_tool
 def test_input_value_wrapper(tool):
-    parameter = IntegerToolParameter(tool, XML('<param name="blah" type="integer" size="4" value="10" min="0" />'))
+    parameter = IntegerToolParameter(tool, XML('<param name="blah" type="integer" value="10" min="0" />'))
     wrapper = InputValueWrapper(parameter, "5")
     assert str(wrapper) == "5"
+    assert int(wrapper) == 5
+    assert wrapper == "5"
+    assert wrapper == 5
+    assert wrapper == 5.0
+    assert wrapper > 2
+    assert wrapper < 10
 
 
 def test_dataset_wrapper():
@@ -102,9 +109,25 @@ def test_dataset_wrapper():
 def test_dataset_wrapper_false_path():
     dataset = MockDataset()
     new_path = "/new/path/dataset_123.dat"
-    wrapper = DatasetFilenameWrapper(dataset, dataset_path=Bunch(false_path=new_path))
+    wrapper = DatasetFilenameWrapper(dataset, compute_environment=MockComputeEnvironment(false_path=new_path))
     assert str(wrapper) == new_path
     assert wrapper.file_name == new_path
+
+
+class MockComputeEnvironment(object):
+
+    def __init__(self, false_path, false_extra_files_path=None):
+        self.false_path = false_path
+        self.false_extra_files_path = false_extra_files_path
+
+    def input_path_rewrite(self, dataset):
+        return self.false_path
+
+    def input_extra_files_rewrite(self, dataset):
+        return self.false_extra_files_path
+
+    def unstructured_path_rewrite(self, path):
+        return "Rewrite<%s>" % path
 
 
 def test_dataset_false_extra_files_path():
@@ -115,13 +138,12 @@ def test_dataset_false_extra_files_path():
 
     new_path = "/new/path/dataset_123.dat"
     dataset_path = DatasetPath(123, MOCK_DATASET_PATH, false_path=new_path)
-    wrapper = DatasetFilenameWrapper(dataset, dataset_path=dataset_path)
+    wrapper = DatasetFilenameWrapper(dataset, compute_environment=MockComputeEnvironment(dataset_path))
     # Setting false_path is not enough to override
     assert wrapper.extra_files_path == MOCK_DATASET_EXTRA_FILES_PATH
 
     new_files_path = "/new/path/dataset_123_files"
-    dataset_path = DatasetPath(123, MOCK_DATASET_PATH, false_path=new_path, false_extra_files_path=new_files_path)
-    wrapper = DatasetFilenameWrapper(dataset, dataset_path=dataset_path)
+    wrapper = DatasetFilenameWrapper(dataset, compute_environment=MockComputeEnvironment(false_path=new_path, false_extra_files_path=new_files_path))
     assert wrapper.extra_files_path == new_files_path
 
 
@@ -168,6 +190,7 @@ class MockDataset(object):
         self.file_name = MOCK_DATASET_PATH
         self.extra_files_path = MOCK_DATASET_EXTRA_FILES_PATH
         self.ext = MOCK_DATASET_EXT
+        self.tags = []
 
 
 class MockTool(object):

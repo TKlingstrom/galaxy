@@ -1,10 +1,10 @@
-from galaxy.dataset_collections import (
+from galaxy.model.dataset_collections import (
     matching,
     registry,
     type_description,
 )
 
-TYPE_REGISTRY = registry.DatasetCollectionTypesRegistry(None)
+TYPE_REGISTRY = registry.DatasetCollectionTypesRegistry()
 TYPE_DESCRIPTION_FACTORY = type_description.CollectionTypeDescriptionFactory(TYPE_REGISTRY)
 
 
@@ -117,6 +117,7 @@ class MockCollection(object):
     def __init__(self, collection_type, elements):
         self.collection_type = collection_type
         self.elements = elements
+        self.populated = True
 
 
 class MockCollectionElement(object):

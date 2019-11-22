@@ -2,7 +2,15 @@ import datetime
 import uuid
 
 
-class Dictifiable:
+def dict_for(obj, **kwds):
+    # Create dict to represent item.
+    return dict(
+        model_class=obj.__class__.__name__,
+        **kwds
+    )
+
+
+class Dictifiable(object):
     """ Mixin that enables objects to be converted to dictionaries. This is useful
         when for sharing objects across boundaries, such as the API, tool scripts,
         and JavaScript code. """
@@ -23,7 +31,7 @@ class Dictifiable:
             # first and then default to to_dict?
             try:
                 return item.to_dict(view=view, value_mapper=value_mapper)
-            except:
+            except Exception:
                 if key in value_mapper:
                     return value_mapper.get(key)(item)
                 if type(item) == datetime.datetime:
@@ -38,9 +46,7 @@ class Dictifiable:
                 return item
 
         # Create dict to represent item.
-        rval = dict(
-            model_class=self.__class__.__name__
-        )
+        rval = dict_for(self)
 
         # Fill item dict with visible keys.
         try:

@@ -14,18 +14,18 @@ def main():
 
     # index range 1-1000, current sections/tools divided between 250-750
     sectionindex = 250
-    sectionfactor = int(500 / len(root.getchildren()))
+    sectionfactor = int(500 / len(root))
 
-    for rootchild in root.getchildren():
+    for rootchild in root:
         currentsectionlabel = ""
         if (rootchild.tag == "section"):
             sectionname = rootchild.attrib['name']
             # per section tool index range 1-1000, current labels/tools
             # divided between 20 and 750
             toolindex = 250
-            toolfactor = int(500 / len(rootchild.getchildren()))
+            toolfactor = int(500 / len(rootchild))
             currentlabel = ""
-            for sectionchild in rootchild.getchildren():
+            for sectionchild in rootchild:
                 if (sectionchild.tag == "tool"):
                     addToToolDict(sectionchild, sectionname, sectionindex, toolindex, currentlabel)
                     toolindex += toolfactor
@@ -123,9 +123,8 @@ def getfnl(startdir):
             if fn.endswith('.xml'):
                 try:
                     doc = ET.parse(fullfn)
-                except:
-                    print "Oops, bad xml in: ", fullfn
-                    raise
+                except Exception as e:
+                    raise Exception("Oops, bad XML in '%s': %s" % (fullfn, e))
                 rootelement = doc.getroot()
                 # here we check if this xml file actually is a tool conf xml!
                 if rootelement.tag == 'tool':

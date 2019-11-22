@@ -2,8 +2,8 @@ import os
 from unittest import TestCase
 from xml.etree.ElementTree import XML
 
+from galaxy.job_execution.datasets import DatasetPath
 from galaxy.jobs import SimpleComputeEnvironment
-from galaxy.jobs.datasets import DatasetPath
 from galaxy.model import (
     Dataset,
     History,
@@ -12,6 +12,7 @@ from galaxy.model import (
     JobParameter,
     JobToInputDatasetAssociation
 )
+from galaxy.tool_util.parser.output_objects import ToolOutput
 from galaxy.tools.evaluation import ToolEvaluator
 # For MockTool
 from galaxy.tools.parameters import params_from_strings
@@ -25,14 +26,14 @@ from galaxy.tools.parameters.grouping import (
     ConditionalWhen,
     Repeat
 )
-from galaxy.tools.parser.output_objects import ToolOutput
 from galaxy.util.bunch import Bunch
 # Test fixtures for Galaxy infrastructure.
-from tools_support import UsesApp
+from ..tools_support import UsesApp
 
 # To Test:
 # - param_file handling.
 TEST_TOOL_DIRECTORY = "/path/to/the/tool"
+TEST_GALAXY_URL = "http://mycool.galaxyproject.org:8456"
 
 
 class ToolEvaluatorTestCase(TestCase, UsesApp):
@@ -42,6 +43,7 @@ class ToolEvaluatorTestCase(TestCase, UsesApp):
         self.tool = MockTool(self.app)
         self.job = Job()
         self.job.history = History()
+        self.job.history.id = 42
         self.job.parameters = [JobParameter(name="thresh", value="4")]
         self.evaluator = ToolEvaluator(self.app, self.tool, self.job, self.test_directory)
 
@@ -52,7 +54,7 @@ class ToolEvaluatorTestCase(TestCase, UsesApp):
         self._setup_test_bwa_job()
         self._set_compute_environment()
         command_line, extra_filenames, _ = self.evaluator.build()
-        self.assertEquals(command_line, "bwa --thresh=4 --in=/galaxy/files/dataset_1.dat --out=/galaxy/files/dataset_2.dat")
+        self.assertEqual(command_line, "bwa --thresh=4 --in=/galaxy/files/dataset_1.dat --out=/galaxy/files/dataset_2.dat")
 
     def test_repeat_evaluation(self):
         repeat = Repeat()
@@ -63,7 +65,19 @@ class ToolEvaluatorTestCase(TestCase, UsesApp):
         self.tool._command_line = "prog1 #for $r_i in $r # $r_i.thresh#end for#"
         self._set_compute_environment()
         command_line, extra_filenames, _ = self.evaluator.build()
-        self.assertEquals(command_line, "prog1  4 5")
+        self.assertEqual(command_line, "prog1  4 5")
+
+    def test_eval_galaxy_url(self):
+        self.tool._command_line = "prog1 $__galaxy_url__"
+        self._set_compute_environment()
+        command_line, extra_filenames, _ = self.evaluator.build()
+        self.assertEqual(command_line, "prog1 %s" % TEST_GALAXY_URL)
+
+    def test_eval_history_id(self):
+        self.tool._command_line = "prog1 '$__history_id__'"
+        self._set_compute_environment()
+        command_line, extra_filenames, _ = self.evaluator.build()
+        self.assertEqual(command_line, "prog1 '%s'" % self.app.security.encode_id(42))
 
     def test_conditional_evaluation(self):
         select_xml = XML('''<param name="always_true" type="select"><option value="true">True</option></param>''')
@@ -81,7 +95,7 @@ class ToolEvaluatorTestCase(TestCase, UsesApp):
         self.tool._command_line = "prog1 --thresh=${c.thresh} --test_param=${c.always_true}"
         self._set_compute_environment()
         command_line, extra_filenames, _ = self.evaluator.build()
-        self.assertEquals(command_line, "prog1 --thresh=4 --test_param=true")
+        self.assertEqual(command_line, "prog1 --thresh=4 --test_param=true")
 
     def test_evaluation_of_optional_datasets(self):
         # Make sure optional dataset don't cause evaluation to break and
@@ -93,7 +107,7 @@ class ToolEvaluatorTestCase(TestCase, UsesApp):
         self.tool._command_line = "prog1 --opt_input='${input1}'"
         self._set_compute_environment()
         command_line, extra_filenames, _ = self.evaluator.build()
-        self.assertEquals(command_line, "prog1 --opt_input='None'")
+        self.assertEqual(command_line, "prog1 --opt_input='None'")
 
     def test_evaluation_with_path_rewrites_wrapped(self):
         self.tool.check_values = True
@@ -115,21 +129,21 @@ class ToolEvaluatorTestCase(TestCase, UsesApp):
             output_paths=[DatasetPath(2, '/galaxy/files/dataset_2.dat', false_path=job_path_2)],
         )
         command_line, extra_filenames, _ = self.evaluator.build()
-        self.assertEquals(command_line, "bwa --thresh=4 --in=%s --out=%s" % (job_path_1, job_path_2))
+        self.assertEqual(command_line, "bwa --thresh=4 --in=%s --out=%s" % (job_path_1, job_path_2))
 
     def test_configfiles_evaluation(self):
         self.tool.config_files.append(("conf1", None, "$thresh"))
         self.tool._command_line = "prog1 $conf1"
         self._set_compute_environment()
         command_line, extra_filenames, _ = self.evaluator.build()
-        self.assertEquals(len(extra_filenames), 1)
+        self.assertEqual(len(extra_filenames), 1)
         config_filename = extra_filenames[0]
         config_basename = os.path.basename(config_filename)
         # Verify config file written into working directory.
-        self.assertEquals(os.path.join(self.test_directory, config_basename), config_filename)
+        self.assertEqual(os.path.join(self.test_directory, "configs", config_basename), config_filename)
         # Verify config file contents are evaluated against parameters.
         assert open(config_filename, "r").read() == "4"
-        self.assertEquals(command_line, "prog1 %s" % config_filename)
+        self.assertEqual(command_line, "prog1 %s" % config_filename)
 
     def test_arbitrary_path_rewriting_wrapped(self):
         self.tool.check_values = True
@@ -160,14 +174,9 @@ class ToolEvaluatorTestCase(TestCase, UsesApp):
             "index_path": parameter
         })
         self.tool._command_line = "prog1 $index_path.fields.path"
-
-        def test_path_rewriter(v):
-            if v:
-                v = v.replace("/old", "/new")
-            return v
-        self._set_compute_environment(path_rewriter=test_path_rewriter)
+        self._set_compute_environment(unstructured_path_rewrites={"/old": "/new"})
         command_line, extra_filenames, _ = self.evaluator.build()
-        self.assertEquals(command_line, "prog1 /new/path/human")
+        self.assertEqual(command_line, "prog1 /new/path/human")
 
     def test_template_property_app(self):
         self._assert_template_property_is("$__app__.config.new_file_path", self.app.config.new_file_path)
@@ -187,14 +196,14 @@ class ToolEvaluatorTestCase(TestCase, UsesApp):
         self._set_compute_environment()
         _, extra_filenames, _ = self.evaluator.build()
         config_filename = extra_filenames[0]
-        self.assertEquals(open(config_filename, "r").read(), value)
+        self.assertEqual(open(config_filename, "r").read(), value)
 
     def _set_compute_environment(self, **kwds):
         if "working_directory" not in kwds:
             kwds["working_directory"] = self.test_directory
         if "new_file_path" not in kwds:
             kwds["new_file_path"] = self.app.config.new_file_path
-        self.evaluator.set_compute_environment(TestComputeEnviornment(**kwds))
+        self.evaluator.set_compute_environment(TestComputeEnvironment(**kwds))
         assert "exec_before_job" in self.tool.hooks_called
 
     def _setup_test_bwa_job(self):
@@ -218,7 +227,7 @@ class MockHistoryDatasetAssociation(HistoryDatasetAssociation):
         super(MockHistoryDatasetAssociation, self).__init__(**kwds)
 
 
-class TestComputeEnviornment(SimpleComputeEnvironment):
+class TestComputeEnvironment(SimpleComputeEnvironment):
 
     def __init__(
         self,
@@ -226,16 +235,24 @@ class TestComputeEnviornment(SimpleComputeEnvironment):
         working_directory,
         input_paths=['/galaxy/files/dataset_1.dat'],
         output_paths=['/galaxy/files/dataset_2.dat'],
-        path_rewriter=None
+        unstructured_path_rewrites=None
     ):
         self._new_file_path = new_file_path
         self._working_directory = working_directory
         self._input_paths = input_paths
         self._output_paths = output_paths
-        self._path_rewriter = path_rewriter
+        self._unstructured_path_rewrites = unstructured_path_rewrites or {}
 
     def input_paths(self):
         return self._input_paths
+
+    def input_path_rewrite(self, dataset):
+        path = self._input_paths[0]
+        return path.false_path if hasattr(path, "false_path") else path
+
+    def output_path_rewrite(self, dataset):
+        path = self._output_paths[0]
+        return path.false_path if hasattr(path, "false_path") else path
 
     def output_paths(self):
         return self._output_paths
@@ -243,23 +260,33 @@ class TestComputeEnviornment(SimpleComputeEnvironment):
     def working_directory(self):
         return self._working_directory
 
+    def home_directory(self):
+        return self._working_directory
+
+    def tmp_directory(self):
+        return self._working_directory
+
     def new_file_path(self):
         return self._new_file_path
 
-    def unstructured_path_rewriter(self):
-        if self._path_rewriter:
-            return self._path_rewriter
-        else:
-            return super(TestComputeEnviornment, self).unstructured_path_rewriter()
+    def unstructured_path_rewrite(self, path):
+        for key, val in self._unstructured_path_rewrites.items():
+            if path.startswith(key):
+                return path.replace(key, val)
+        return None
 
     def tool_directory(self):
         return TEST_TOOL_DIRECTORY
+
+    def galaxy_url(self):
+        return TEST_GALAXY_URL
 
 
 class MockTool(object):
 
     def __init__(self, app):
         self.profile = 16.01
+        self.python_template_version = '2.7'
         self.app = app
         self.hooks_called = []
         self.environment_variables = []
@@ -277,6 +304,10 @@ class MockTool(object):
         return params_from_strings(self.inputs, params, app, ignore_errors)
 
     @property
+    def config_file(self):
+        return "<fake tool>"
+
+    @property
     def template_macro_params(self):
         return {}
 
@@ -292,6 +323,10 @@ class MockTool(object):
         return dict(
             output1=ToolOutput("output1"),
         )
+
+    @property
+    def tmp_directory_vars(self):
+        return ["TMP"]
 
     @property
     def config_files(self):

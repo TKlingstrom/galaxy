@@ -2,13 +2,20 @@
 Upload class
 """
 
+from __future__ import absolute_import
+
 import logging
-import urllib
+
+import requests
+from six.moves.urllib.parse import urlencode
 
 from galaxy import jobs, web
-from galaxy.util import Params
+from galaxy.util import (
+    Params,
+    unicodify,
+)
 from galaxy.util.hash_util import hmac_new
-from galaxy.web.base.controller import BaseUIController
+from galaxy.webapps.base.controller import BaseUIController
 
 log = logging.getLogger(__name__)
 
@@ -71,10 +78,10 @@ class ASync(BaseUIController):
 
                 # Assume there is exactly one output file possible
                 TOOL_OUTPUT_TYPE = None
-                for idx, obj in enumerate(tool.outputs.values()):
+                for key, obj in tool.outputs.items():
                     try:
                         TOOL_OUTPUT_TYPE = obj.format
-                        params[tool.outputs.keys()[idx]] = data.id
+                        params[key] = data.id
                         break
                     except Exception:
                         # exclude outputs different from ToolOutput (e.g. collections) from the previous assumption
@@ -140,10 +147,11 @@ class ASync(BaseUIController):
             data.info = GALAXY_INFO
             trans.sa_session.add(data)  # Need to add data to session before setting state (setting state requires that the data object is in the session, but this may change)
             data.state = data.states.NEW
-            open(data.file_name, 'wb').close()  # create the file
             trans.history.add_dataset(data, genome_build=GALAXY_BUILD)
             trans.sa_session.add(trans.history)
             trans.sa_session.flush()
+            # Need to explicitly create the file
+            data.dataset.object_store.create(data)
             trans.log_event("Added dataset %d to history %d" % (data.id, trans.history.id), tool_id=tool_id)
 
             try:
@@ -159,16 +167,15 @@ class ASync(BaseUIController):
                     url_join_char = '&'
                 else:
                     url_join_char = '?'
-                url = "%s%s%s" % (url, url_join_char, urllib.urlencode(params.flatten()))
+                url = "%s%s%s" % (url, url_join_char, urlencode(params.flatten()))
                 log.debug("connecting to -> %s" % url)
                 trans.log_event("Async connecting to -> %s" % url)
-                text = urllib.urlopen(url).read(-1)
-                text = text.strip()
+                text = requests.get(url).text.strip()
                 if not text.endswith('OK'):
                     raise Exception(text)
                 data.state = data.blurb = data.states.RUNNING
             except Exception as e:
-                data.info = str(e)
+                data.info = unicodify(e)
                 data.state = data.blurb = data.states.ERROR
 
             trans.sa_session.flush()

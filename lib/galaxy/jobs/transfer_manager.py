@@ -9,7 +9,13 @@ import socket
 import subprocess
 import threading
 
-from galaxy.util import listify, sleeper
+from six.moves import shlex_quote
+
+from galaxy.util import (
+    listify,
+    sleeper,
+    unicodify,
+)
 from galaxy.util.json import jsonrpc_request, validate_jsonrpc_response
 
 log = logging.getLogger(__name__)
@@ -23,7 +29,7 @@ class TransferManager(object):
     def __init__(self, app):
         self.app = app
         self.sa_session = app.model.context.current
-        self.command = 'python %s' % os.path.abspath(os.path.join(os.getcwd(), 'scripts', 'transfer.py'))
+        self.command = ['python', os.path.abspath(os.path.join(os.getcwd(), 'scripts', 'transfer.py'))]
         if app.config.get_bool('enable_job_recovery', True):
             # Only one Galaxy server process should be able to recover jobs! (otherwise you'll have nasty race conditions)
             self.running = True
@@ -68,9 +74,9 @@ class TransferManager(object):
             # The transfer script should daemonize fairly quickly - if this is
             # not the case, this process will need to be moved to a
             # non-blocking method.
-            cmd = '%s %s' % (self.command, tj.id)
-            log.debug('Transfer command is: %s' % cmd)
-            p = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            cmd = self.command + [tj.id]
+            log.debug('Transfer command is: %s', ' '.join(map(shlex_quote, cmd)))
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             p.wait()
             output = p.stdout.read(32768)
             if p.returncode != 0:
@@ -111,7 +117,7 @@ class TransferManager(object):
                     self.sa_session.refresh(tj)
                     error = e.args
                     if type(error) != dict:
-                        error = dict(code=256, message='Error connecting to transfer daemon', data=str(e))
+                        error = dict(code=256, message='Error connecting to transfer daemon', data=unicodify(e))
                     rval.append(dict(transfer_job_id=tj.id, state=tj.state, error=error))
             else:
                 self.sa_session.refresh(tj)
@@ -145,7 +151,7 @@ class TransferManager(object):
                 # restart the transfer if socket communication fails repeatedly.
                 try:
                     os.kill(tj.pid, 0)
-                except:
+                except Exception:
                     self.sa_session.refresh(tj)
                     if tj.state == tj.states.RUNNING:
                         log.error('Transfer job %s is marked as running but pid %s appears to be dead.' % (tj.id, tj.pid))

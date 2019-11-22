@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 """
-import os
-import sys
 import unittest
 
+import mock
 import sqlalchemy
 from six import string_types
 from sqlalchemy import true
@@ -23,17 +22,14 @@ from galaxy.managers.histories import (
     HistoryManager,
     HistorySerializer
 )
-
-unit_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-sys.path.insert(1, unit_root)
-from unittest_utils import galaxy_mock
-
 from .base import BaseTestCase
+from ..unittest_utils import galaxy_mock
 
 default_password = '123456'
 user2_data = dict(email='user2@user2.user2', username='user2', password=default_password)
 user3_data = dict(email='user3@user3.user3', username='user3', password=default_password)
 user4_data = dict(email='user4@user4.user4', username='user4', password=default_password)
+parsed_filter = base.ModelFilterParser.parsed_filter
 
 
 class HistoryManagerTestCase(BaseTestCase):
@@ -504,6 +500,24 @@ class HistorySerializerTestCase(BaseTestCase):
         self.log('serialized should jsonify well')
         self.assertIsJsonifyable(serialized)
 
+    def test_history_resume(self):
+        user2 = self.user_manager.create(**user2_data)
+        history = self.history_manager.create(name='history', user=user2)
+        # No running jobs
+        history.resume_paused_jobs()
+        # Mock running jobs
+        with mock.patch('galaxy.model.History.paused_jobs', new_callable=mock.PropertyMock) as mock_paused_jobs:
+            job = model.Job()
+            job.state = model.Job.states.PAUSED
+            jobs = [job]
+            self.trans.sa_session.add(jobs[0])
+            self.trans.sa_session.flush()
+            assert job.state == model.Job.states.PAUSED
+            mock_paused_jobs.return_value = jobs
+            history.resume_paused_jobs()
+            mock_paused_jobs.assert_called_once()
+            assert job.state == model.Job.states.NEW, job.state
+
     def _history_state_from_states_and_deleted(self, user, hda_state_and_deleted_tuples):
         history = self.history_manager.create(name='name', user=user)
         for state, deleted in hda_state_and_deleted_tuples:
@@ -655,7 +669,7 @@ class HistoryDeserializerTestCase(BaseTestCase):
         self.assertEqual(len(user_shares), 0)
 
         self.log('adding a bad user id should error')
-        self.assertRaises(AttributeError,
+        self.assertRaises(TypeError,
             deserializer.deserialize, item, {'users_shared_with': [None]}, user=user2)
 
         self.log('adding a non-existing user id should do nothing')
@@ -684,7 +698,7 @@ class HistoryFiltersTestCase(BaseTestCase):
         self.assertEqual(len(filters), 3)
 
         self.log('values should be parsed')
-        self.assertIsInstance(filters[1].right, sqlalchemy.sql.elements.True_)
+        self.assertIsInstance(filters[1].filter.right, sqlalchemy.sql.elements.True_)
 
     def test_parse_filters_invalid_filters(self):
         self.log('should error on non-column attr')
@@ -718,8 +732,6 @@ class HistoryFiltersTestCase(BaseTestCase):
             ('name', 'like', 'history%'),
         ])
         histories = self.history_manager.list(filters=filters)
-        # for h in histories:
-        #    print h.name
         self.assertEqual(histories, [history1, history2, history3])
 
         filters = self.filter_parser.parse_filters([('name', 'like', '%2'), ])
@@ -752,7 +764,7 @@ class HistoryFiltersTestCase(BaseTestCase):
         history3 = self.history_manager.create(name='history3', user=user2)
 
         filters = self.filter_parser.parse_filters([('annotation', 'has', 'no play'), ])
-        anno_filter = filters[0]
+        anno_filter = filters[0].filter
 
         history3.add_item_annotation(self.trans.sa_session, user2, history3, "All work and no play")
         self.trans.sa_session.flush()
@@ -786,7 +798,7 @@ class HistoryFiltersTestCase(BaseTestCase):
         self.log('should have parsed out a single filter')
         self.assertEqual(len(filters), 1)
 
-        filter_ = filters[0]
+        filter_ = filters[0].filter
         fake = galaxy_mock.OpenObject()
         fake.name = '123'
         self.log('123 should return true through the filter')

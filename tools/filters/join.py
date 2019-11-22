@@ -11,6 +11,7 @@ from __future__ import print_function
 import json
 import optparse
 import os
+import re
 import struct
 import sys
 import tempfile
@@ -19,7 +20,7 @@ from galaxy.util import stringify_dictionary_keys
 from galaxy.util.bunch import Bunch
 
 
-class OffsetList:
+class OffsetList(object):
     def __init__(self, filesize=0, fmt=None):
         self.file = tempfile.NamedTemporaryFile('w+b')
         if fmt:
@@ -78,7 +79,7 @@ class SortedOffsets(OffsetList):
     def __init__(self, indexed_filename, column, split=None):
         OffsetList.__init__(self, os.stat(indexed_filename).st_size)
         self.indexed_filename = indexed_filename
-        self.indexed_file = open(indexed_filename, 'rb')
+        self.indexed_file = open(indexed_filename, 'r')
         self.column = column
         self.split = split
         self.last_identifier = None
@@ -145,10 +146,10 @@ class SortedOffsets(OffsetList):
 
 
 # indexed set of offsets, index is built on demand
-class OffsetIndex:
+class OffsetIndex(object):
     def __init__(self, filename, column, split=None, index_depth=3):
         self.filename = filename
-        self.file = open(filename, 'rb')
+        self.file = open(filename, 'r')
         self.column = column
         self.split = split
         self._offsets = {}
@@ -238,11 +239,11 @@ class OffsetIndex:
                 first_char = identifier[0]
 
 
-class BufferedIndex:
+class BufferedIndex(object):
     def __init__(self, filename, column, split=None, buffer=1000000, index_depth=3):
         self.index = OffsetIndex(filename, column, split, index_depth)
         self.buffered_offsets = {}
-        f = open(filename, 'rb')
+        f = open(filename, 'r')
         offset = f.tell()
         identified_offset_count = 1
         while True:
@@ -284,7 +285,7 @@ def fill_empty_columns(line, split, fill_values):
     return split.join(filled_columns)
 
 
-def join_files(filename1, column1, filename2, column2, out_filename, split=None, buffer=1000000, keep_unmatched=False, keep_partial=False, index_depth=3, fill_options=None):
+def join_files(filename1, column1, filename2, column2, out_filename, split=None, buffer=1000000, keep_unmatched=False, keep_partial=False, keep_headers=False, index_depth=3, fill_options=None):
     # return identifier based upon line
     def get_identifier_by_line(line, column, split=None):
         if isinstance(line, str):
@@ -294,9 +295,18 @@ def join_files(filename1, column1, filename2, column2, out_filename, split=None,
         return None
     if fill_options is None:
         fill_options = Bunch(fill_unjoined_only=True, file1_columns=None, file2_columns=None)
-    out = open(out_filename, 'w+b')
+    keep_headers_done = False
+    out = open(out_filename, 'w')
     index = BufferedIndex(filename2, column2, split, buffer, index_depth)
-    for line1 in open(filename1, 'rb'):
+    for line1 in open(filename1, 'r'):
+        if keep_headers and not keep_headers_done:
+            header1 = line1
+            with open(filename2, 'r') as file2:
+                header2 = file2.readline()
+                header2 = re.sub(r'^#', '', header2)
+            out.write("%s%s%s\n" % (header1.rstrip('\r\n'), split, header2.rstrip('\r\n')))
+            keep_headers_done = True
+            continue
         identifier = get_identifier_by_line(line1, column1, split)
         if identifier:
             written = False
@@ -352,6 +362,12 @@ def main():
         dest='fill_options_file',
         type='str', default=None,
         help='Fill empty columns with a values from a JSONified file.')
+    parser.add_option(
+        '-H', '--keep_headers',
+        action='store_true',
+        dest='keep_headers',
+        default=False,
+        help='Keep the headers')
 
     options, args = parser.parse_args()
 
@@ -376,14 +392,14 @@ def main():
         column1 = int(args[2]) - 1
         column2 = int(args[3]) - 1
         out_filename = args[4]
-    except:
+    except Exception:
         print("Error parsing command line.", file=sys.stderr)
         sys.exit()
 
     # Character for splitting fields and joining lines
     split = "\t"
 
-    return join_files(filename1, column1, filename2, column2, out_filename, split, options.buffer, options.keep_unmatched, options.keep_partial, options.index_depth, fill_options=fill_options)
+    return join_files(filename1, column1, filename2, column2, out_filename, split, options.buffer, options.keep_unmatched, options.keep_partial, options.keep_headers, options.index_depth, fill_options=fill_options)
 
 
 if __name__ == "__main__":

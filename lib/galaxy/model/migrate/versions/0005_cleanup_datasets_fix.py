@@ -1,18 +1,42 @@
+from __future__ import print_function
+
 import datetime
 import errno
 import logging
 import os
 import time
 
-from sqlalchemy import and_, Boolean, Column, DateTime, false, ForeignKey, Integer, MetaData, not_, Numeric, Table, TEXT, true
-from sqlalchemy.orm import backref, mapper, relation, scoped_session, sessionmaker
+from sqlalchemy import (
+    and_,
+    Boolean,
+    Column,
+    DateTime,
+    false,
+    ForeignKey,
+    Integer,
+    MetaData,
+    not_,
+    Numeric,
+    Table,
+    TEXT,
+    true
+)
+from sqlalchemy.orm import (
+    backref,
+    mapper,
+    relation,
+    scoped_session,
+    sessionmaker
+)
 
-from galaxy.model.custom_types import MetadataType, TrimmedString
+from galaxy.model.custom_types import (
+    MetadataType,
+    TrimmedString
+)
 from galaxy.model.metadata import MetadataCollection
 from galaxy.util.bunch import Bunch
 
 log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)
 now = datetime.datetime.utcnow
 metadata = MetaData()
 context = scoped_session(sessionmaker(autoflush=False, autocommit=True))
@@ -233,16 +257,8 @@ class DatasetInstance(object):
         """Returns the full data. To stream it open the file_name and read/write as needed"""
         return self.datatype.get_raw_data(self)
 
-    def write_from_stream(self, stream):
-        """Writes data from a stream"""
-        self.datatype.write_from_stream(self, stream)
-
-    def set_raw_data(self, data):
-        """Saves the data on the disc"""
-        self.datatype.set_raw_data(self, data)
-
-    def set_peek(self, is_multi_byte=False):
-        return self.datatype.set_peek(self, is_multi_byte=is_multi_byte)
+    def set_peek(self):
+        return self.datatype.set_peek(self)
 
     def init_meta(self, copy_from=None):
         return self.datatype.init_meta(self, copy_from=copy_from)
@@ -692,13 +708,15 @@ def __guess_dataset_by_filename(filename):
         if fields:
             if fields[-1].startswith('dataset_') and fields[-1].endswith('.dat'):  # dataset_%d.dat
                 return Dataset.get(int(fields[-1][len('dataset_'): -len('.dat')]))
-    except:
+    except Exception:
         pass  # some parsing error, we can't guess Dataset
     return None
 
 
 def upgrade(migrate_engine):
+    print(__doc__)
     metadata.bind = migrate_engine
+
     log.debug("Fixing a discrepancy concerning deleted shared history items.")
     affected_items = 0
     start_time = time.time()
@@ -742,5 +760,4 @@ def upgrade(migrate_engine):
 
 
 def downgrade(migrate_engine):
-    metadata.bind = migrate_engine
-    log.debug("Downgrade is not possible.")
+    pass

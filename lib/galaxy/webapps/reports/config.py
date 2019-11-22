@@ -4,8 +4,6 @@ import os
 import re
 import sys
 
-from six.moves import configparser
-
 from galaxy.util import string_as_bool
 
 log = logging.getLogger(__name__)
@@ -37,7 +35,7 @@ class Configuration(object):
         self.use_remote_user = string_as_bool(kwargs.get("use_remote_user", "False"))
         self.require_login = string_as_bool(kwargs.get("require_login", "False"))
         self.template_path = resolve_path(kwargs.get("template_path", "templates"), self.root)
-        self.template_cache = resolve_path(kwargs.get("template_cache_path", "database/compiled_templates/reports"), self.root)
+        self.template_cache_path = resolve_path(kwargs.get("template_cache_path", "database/compiled_templates/reports"), self.root)
         self.allow_user_creation = string_as_bool(kwargs.get("allow_user_creation", "True"))
         self.allow_user_deletion = string_as_bool(kwargs.get("allow_user_deletion", "False"))
         self.log_actions = string_as_bool(kwargs.get('log_actions', 'False'))
@@ -50,21 +48,26 @@ class Configuration(object):
         self.blog_url = kwargs.get('blog_url', None)
         self.screencasts_url = kwargs.get('screencasts_url', None)
         self.log_events = False
-        self.cookie_path = kwargs.get("cookie_path", "/")
+        self.cookie_path = kwargs.get("cookie_path", None)
+        self.cookie_domain = kwargs.get("cookie_domain", None)
         # Error logging with sentry
         self.sentry_dsn = kwargs.get('sentry_dsn', None)
-        # Parse global_conf
-        global_conf = kwargs.get('global_conf', None)
-        global_conf_parser = configparser.ConfigParser()
-        if global_conf and "__file__" in global_conf:
-            global_conf_parser.read(global_conf['__file__'])
 
-    def get(self, key, default):
+        # Security/Policy Compliance
+        self.redact_username_in_logs = False
+        self.redact_email_in_job_name = False
+        self.enable_beta_gdpr = string_as_bool(kwargs.get("enable_beta_gdpr", False))
+        if self.enable_beta_gdpr:
+            self.redact_username_in_logs = True
+            self.redact_email_in_job_name = True
+            self.allow_user_deletion = True
+
+    def get(self, key, default=None):
         return self.config_dict.get(key, default)
 
     def check(self):
         # Check that required directories exist
-        for path in self.root, self.file_path, self.template_path:
+        for path in self.root, self.template_path:
             if not os.path.isdir(path):
                 raise ConfigurationError("Directory does not exist: %s" % path)
 

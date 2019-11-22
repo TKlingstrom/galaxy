@@ -2,19 +2,18 @@
 API operations allowing clients to determine Galaxy instance's capabilities
 and configuration settings.
 """
-
-from galaxy.web import _future_expose_api_anonymous_and_sessionless as expose_api_anonymous_and_sessionless
-from galaxy.web import _future_expose_api as expose_api
-from galaxy.web import _future_expose_api as expose_api_anonymous
-from galaxy.web import require_admin
-from galaxy.web.base.controller import BaseAPIController
-from galaxy.managers import configuration, users
-from galaxy.queue_worker import send_control_task
-
 import json
+import logging
 import os
 
-import logging
+from galaxy.managers import configuration, users
+from galaxy.web import (
+    expose_api,
+    expose_api_anonymous_and_sessionless,
+    require_admin
+)
+from galaxy.webapps.base.controller import BaseAPIController
+
 log = logging.getLogger(__name__)
 
 
@@ -26,7 +25,7 @@ class ConfigurationController(BaseAPIController):
         self.admin_config_serializer = configuration.AdminConfigSerializer(app)
         self.user_manager = users.UserManager(app)
 
-    @expose_api_anonymous
+    @expose_api
     def whoami(self, trans, **kwd):
         """
         GET /api/whoami
@@ -36,7 +35,10 @@ class ConfigurationController(BaseAPIController):
         :rtype:   dict
         """
         current_user = self.user_manager.current_user(trans)
-        return current_user.to_dict()
+        rval = None
+        if current_user:  # None for master API key for instance
+            rval = current_user.to_dict()
+        return rval
 
     @expose_api_anonymous_and_sessionless
     def index(self, trans, **kwd):
@@ -46,7 +48,7 @@ class ConfigurationController(BaseAPIController):
 
         Note: a more complete list is returned if the user is an admin.
         """
-        is_admin = trans.user_is_admin()
+        is_admin = trans.user_is_admin
         serialization_params = self._parse_serialization_params(kwd, 'all')
         return self.get_config_dict(trans, is_admin, **serialization_params)
 
@@ -84,14 +86,29 @@ class ConfigurationController(BaseAPIController):
         serialized = serializer.serialize_to_view(self.app.config, view=view, keys=keys, default_view=default_view)
         return serialized
 
-    @expose_api
     @require_admin
+    @expose_api
     def dynamic_tool_confs(self, trans):
+        # WARNING: If this method is ever changed so as not to require admin privileges, update the nginx proxy
+        # documentation, since this path is used as an authentication-by-proxy method for securing other paths on the
+        # server. A dedicated endpoint should probably be added to do that instead.
         confs = self.app.toolbox.dynamic_confs(include_migrated_tool_conf=True)
-        return map(_tool_conf_to_dict, confs)
+        return list(map(_tool_conf_to_dict, confs))
 
-    @expose_api
     @require_admin
+    @expose_api
+    def decode_id(self, trans, encoded_id, **kwds):
+        """Decode a given id."""
+        decoded_id = None
+        # Handle the special case for library folders
+        if ((len(encoded_id) % 16 == 1) and encoded_id.startswith('F')):
+            decoded_id = trans.security.decode_id(encoded_id[1:])
+        else:
+            decoded_id = trans.security.decode_id(encoded_id)
+        return {"decoded_id": decoded_id}
+
+    @require_admin
+    @expose_api
     def tool_lineages(self, trans):
         rval = []
         for id, tool in self.app.toolbox.tools():
@@ -107,14 +124,14 @@ class ConfigurationController(BaseAPIController):
             rval.append(entry)
         return rval
 
-    @expose_api
     @require_admin
+    @expose_api
     def reload_toolbox(self, trans, **kwds):
         """
         PUT /api/configuration/toolbox
         Reload the Galaxy toolbox (but not individual tools).
         """
-        send_control_task(self.app.toolbox.app, 'reload_toolbox')
+        self.app.queue_worker.send_control_task('reload_toolbox')
 
 
 def _tool_conf_to_dict(conf):

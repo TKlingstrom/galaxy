@@ -6,7 +6,6 @@ from six.moves.urllib.parse import quote_plus
 from galaxy.util import string_as_bool
 from galaxy.util.bunch import Bunch
 from galaxy.util.template import fill_template
-from galaxy.web import url_for
 
 DEFAULT_DATASET_NAME = 'dataset'
 
@@ -33,6 +32,7 @@ class DisplayApplicationParameter(object):
         self.strip = string_as_bool(elem.get('strip', 'False'))
         self.strip_https = string_as_bool(elem.get('strip_https', 'False'))
         self.allow_override = string_as_bool(elem.get('allow_override', 'False'))  # Passing query param app_<name>=<value> to dataset controller allows override if this is true.
+        self.allow_cors = string_as_bool(elem.get('allow_cors', 'False'))
 
     def get_value(self, other_values, dataset_hash, user_hash, trans):
         raise Exception('get_value() is unimplemented for DisplayApplicationDataParameter')
@@ -191,14 +191,14 @@ class DisplayParameterValueWrapper(object):
         if self.parameter.strip_https and base_url[: 5].lower() == 'https':
             base_url = "http%s" % base_url[5:]
         return "%s%s" % (base_url,
-                         url_for(controller='dataset',
-                                 action="display_application",
-                                 dataset_id=self._dataset_hash,
-                                 user_id=self._user_hash,
-                                 app_name=quote_plus(self.parameter.link.display_application.id),
-                                 link_name=quote_plus(self.parameter.link.id),
-                                 app_action=self.action_name,
-                                 action_param=self._url))
+                         self.trans.app.url_for(controller='dataset',
+                                                action="display_application",
+                                                dataset_id=self._dataset_hash,
+                                                user_id=self._user_hash,
+                                                app_name=quote_plus(self.parameter.link.display_application.id),
+                                                link_name=quote_plus(self.parameter.link.id),
+                                                app_action=self.action_name,
+                                                action_param=self._url))
 
     @property
     def action_name(self):

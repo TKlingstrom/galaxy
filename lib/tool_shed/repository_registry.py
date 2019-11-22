@@ -3,9 +3,9 @@ import logging
 from sqlalchemy import and_, false, or_
 
 import tool_shed.repository_types.util as rt_util
-from galaxy.webapps.tool_shed import model
 from tool_shed.util import hg_util
 from tool_shed.util import metadata_util
+from tool_shed.webapp import model
 
 log = logging.getLogger(__name__)
 
@@ -147,10 +147,9 @@ class Registry(object):
             latest_installable_changeset_revision, is_level_one_certified = certified_level_one_tuple
             if is_level_one_certified:
                 certified_level_one_tuples.append(certified_level_one_tuple)
-                clause_list.append("%s=%d and %s='%s'" % (model.RepositoryMetadata.table.c.repository_id,
-                                                          repository.id,
-                                                          model.RepositoryMetadata.table.c.changeset_revision,
-                                                          latest_installable_changeset_revision))
+                clause_list.append(and_(
+                    model.RepositoryMetadata.table.c.repository_id == repository.id,
+                    model.RepositoryMetadata.table.c.changeset_revision == latest_installable_changeset_revision))
         return clause_list
 
     def get_certified_level_one_tuple(self, repository):
@@ -161,9 +160,8 @@ class Registry(object):
             return (None, False)
         if repository.deleted or repository.deprecated:
             return (None, False)
-        repo = hg_util.get_repo_for_repository(self.app, repository=repository, repo_path=None, create=False)
         # Get the latest installable changeset revision since that is all that is currently configured for testing.
-        latest_installable_changeset_revision = metadata_util.get_latest_downloadable_changeset_revision(self.app, repository, repo)
+        latest_installable_changeset_revision = metadata_util.get_latest_downloadable_changeset_revision(self.app, repository)
         if latest_installable_changeset_revision not in [None, hg_util.INITIAL_CHANGELOG_HASH]:
             encoded_repository_id = self.app.security.encode_id(repository.id)
             repository_metadata = metadata_util.get_repository_metadata_by_changeset_revision(self.app,

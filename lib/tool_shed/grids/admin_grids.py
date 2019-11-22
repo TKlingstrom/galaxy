@@ -3,10 +3,11 @@ import logging
 from markupsafe import escape
 from sqlalchemy import and_
 
-from galaxy.web.framework.helpers import grids, time_ago
-from galaxy.webapps.tool_shed import model
+from galaxy.web.framework.helpers import time_ago
+from galaxy.webapps.reports.framework import grids
 from tool_shed.grids.repository_grids import CategoryGrid, RepositoryGrid
 from tool_shed.util import hg_util
+from tool_shed.webapp import model
 
 log = logging.getLogger(__name__)
 

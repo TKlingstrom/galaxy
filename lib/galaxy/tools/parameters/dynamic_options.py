@@ -4,6 +4,7 @@ on the values of other parameters or other aspects of the current state)
 """
 import logging
 import os
+import re
 
 from six import StringIO
 
@@ -14,7 +15,6 @@ from galaxy.model import (
     User
 )
 from galaxy.util import string_as_bool
-
 from . import validation
 
 log = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ class Filter(object):
         self.elem = elem
 
     def get_dependency_name(self):
-        """Returns the name of any depedencies, otherwise None"""
+        """Returns the name of any dependencies, otherwise None"""
         return None
 
     def filter_options(self, options, trans, other_values):
@@ -72,10 +72,47 @@ class StaticValueFilter(Filter):
         filter_value = self.value
         try:
             filter_value = User.expand_user_properties(trans.user, filter_value)
-        except:
+        except Exception:
             pass
         for fields in options:
-            if (self.keep and fields[self.column] == filter_value) or (not self.keep and fields[self.column] != filter_value):
+            if self.keep == (filter_value == fields[self.column]):
+                rval.append(fields)
+        return rval
+
+
+class RegexpFilter(Filter):
+    """
+    Filters a list of options on a column by a regular expression.
+
+    Type: regexp
+
+    Required Attributes:
+        value: regular expression to compare to
+        column: column in options to compare with
+    Optional Attributes:
+        keep: Keep columns matching the regexp (True)
+              Discard columns matching the regexp (False)
+    """
+
+    def __init__(self, d_option, elem):
+        Filter.__init__(self, d_option, elem)
+        self.value = elem.get("value", None)
+        assert self.value is not None, "Required 'value' attribute missing from filter"
+        column = elem.get("column", None)
+        assert column is not None, "Required 'column' attribute missing from filter, when loading from file"
+        self.column = d_option.column_spec_to_index(column)
+        self.keep = string_as_bool(elem.get("keep", 'True'))
+
+    def filter_options(self, options, trans, other_values):
+        rval = []
+        filter_value = self.value
+        try:
+            filter_value = User.expand_user_properties(trans.user, filter_value)
+        except Exception:
+            pass
+        filter_pattern = re.compile(filter_value)
+        for fields in options:
+            if self.keep == (not filter_pattern.match(fields[self.column]) is None):
                 rval.append(fields)
         return rval
 
@@ -142,6 +179,9 @@ class DataMetaFilter(Filter):
         if not isinstance(ref, HistoryDatasetAssociation) and not is_data_or_data_list:
             return []  # not a valid dataset
 
+        # get the metadata value. for lists (of data sets) and collections
+        # the meta data value of all elements is determined if its the same
+        # for all, if different are found the filter returns an empty list
         if is_data_list:
             meta_value = None
             for single_ref in ref:
@@ -156,6 +196,8 @@ class DataMetaFilter(Filter):
         else:
             meta_value = ref.metadata.get(self.key, None)
 
+        # if no meta data value could be determined just return a copy
+        # of the original options
         if meta_value is None:
             return [(disp_name, optval, selected) for disp_name, optval, selected in options]
 
@@ -227,7 +269,7 @@ class ParamValueFilter(Filter):
         ref = str(ref)
         rval = []
         for fields in options:
-            if (self.keep and fields[self.column] == ref) or (not self.keep and fields[self.column] != ref):
+            if self.keep == (fields[self.column] == ref):
                 rval.append(fields)
         return rval
 
@@ -277,7 +319,7 @@ class MultipleSplitterFilter(Filter):
         Filter.__init__(self, d_option, elem)
         self.separator = elem.get("separator", ",")
         columns = elem.get("column", None)
-        assert columns is not None, "Required 'columns' attribute missing from filter"
+        assert columns is not None, "Required 'column' attribute missing from filter"
         self.columns = [d_option.column_spec_to_index(column) for column in columns.split(",")]
 
     def filter_options(self, options, trans, other_values):
@@ -293,6 +335,8 @@ class AttributeValueSplitterFilter(Filter):
     """
     Filters a list of attribute-value pairs to be unique attribute names.
 
+    DEPRECATED: just replace with 2 rounds of MultipleSplitterFilter
+
     Type: attribute_value_splitter
 
     Required Attributes:
@@ -306,9 +350,9 @@ class AttributeValueSplitterFilter(Filter):
         Filter.__init__(self, d_option, elem)
         self.pair_separator = elem.get("pair_separator", ",")
         self.name_val_separator = elem.get("name_val_separator", None)
-        self.columns = elem.get("column", None)
-        assert self.columns is not None, "Required 'columns' attribute missing from filter"
-        self.columns = [int(column) for column in self.columns.split(",")]
+        columns = elem.get("column", None)
+        assert columns is not None, "Required 'column' attribute missing from filter"
+        self.columns = [d_option.column_spec_to_index(column) for column in columns.split(",")]
 
     def filter_options(self, options, trans, other_values):
         attr_names = []
@@ -389,7 +433,7 @@ class RemoveValueFilter(Filter):
         self.ref_name = elem.get("ref", None)
         self.meta_ref = elem.get("meta_ref", None)
         self.metadata_key = elem.get("key", None)
-        assert self.value is not None or ((self.ref_name is not None or self.meta_ref is not None)and self.metadata_key is not None), ValueError("Required 'value' or 'ref' and 'key' attributes missing from filter")
+        assert self.value is not None or self.ref_name is not None or (self.meta_ref is not None and self.metadata_key is not None), ValueError("Required 'value', or 'ref', or 'meta_ref' and 'key' attributes missing from filter")
         self.multiple = string_as_bool(elem.get("multiple", "False"))
         self.separator = elem.get("separator", ",")
 
@@ -402,13 +446,14 @@ class RemoveValueFilter(Filter):
                 if self.multiple:
                     option_value = option_value.split(self.separator)
                     for value in filter_value:
-                        if value not in filter_value:
+                        if value not in option_value:
                             return False
                     return True
                 return option_value in filter_value
             if self.multiple:
                 return filter_value in option_value.split(self.separator)
             return option_value == filter_value
+
         value = self.value
         if value is None:
             if self.ref_name is not None:
@@ -420,7 +465,9 @@ class RemoveValueFilter(Filter):
                 if not isinstance(data_ref, HistoryDatasetAssociation) and not isinstance(data_ref, galaxy.tools.wrappers.DatasetFilenameWrapper):
                     return options  # cannot modify options
                 value = data_ref.metadata.get(self.metadata_key, None)
-        return [(disp_name, optval, selected) for disp_name, optval, selected in options if not compare_value(optval, value)]
+        # Default to the second column (i.e. 1) since this used to work only on options produced by the data_meta filter
+        value_col = self.dynamic_option.columns.get('value', 1)
+        return [option for option in options if not compare_value(option[value_col], value)]
 
 
 class SortByColumnFilter(Filter):
@@ -440,20 +487,13 @@ class SortByColumnFilter(Filter):
         self.column = d_option.column_spec_to_index(column)
 
     def filter_options(self, options, trans, other_values):
-        rval = []
-        for fields in options:
-            for j in range(0, len(rval)):
-                if fields[self.column] < rval[j][self.column]:
-                    rval.insert(j, fields)
-                    break
-            else:
-                rval.append(fields)
-        return rval
+        return sorted(options, key=lambda x: x[self.column])
 
 
 filter_types = dict(data_meta=DataMetaFilter,
                     param_value=ParamValueFilter,
                     static_value=StaticValueFilter,
+                    regexp=RegexpFilter,
                     unique_value=UniqueValueFilter,
                     multiple_splitter=MultipleSplitterFilter,
                     attribute_value_splitter=AttributeValueSplitterFilter,
@@ -471,7 +511,7 @@ class DynamicOptions(object):
             for field in from_parameter.split('.'):
                 obj = getattr(obj, field)
             if transform_lines:
-                obj = eval(transform_lines)
+                obj = eval(transform_lines, {'self': self, 'obj': obj})
             return self.parse_file_fields(obj)
         self.tool_param = tool_param
         self.columns = {}
@@ -493,29 +533,16 @@ class DynamicOptions(object):
         self.missing_index_file = None
         dataset_file = elem.get('from_dataset', None)
         from_parameter = elem.get('from_parameter', None)
-        tool_data_table_name = elem.get('from_data_table', None)
+        self.tool_data_table_name = elem.get('from_data_table', None)
         # Options are defined from a data table loaded by the app
-        self.tool_data_table = None
-        self.missing_tool_data_table_name = None
-        if tool_data_table_name:
-            app = tool_param.tool.app
-            if tool_data_table_name in app.tool_data_tables:
-                self.tool_data_table = app.tool_data_tables[tool_data_table_name]
-                # Column definitions are optional, but if provided override those from the table
-                if elem.find("column") is not None:
-                    self.parse_column_definitions(elem)
-                else:
-                    self.columns = self.tool_data_table.columns
-                # Set self.missing_index_file if the index file to
-                # which the tool_data_table refers does not exist.
-                if self.tool_data_table.missing_index_file:
-                    self.missing_index_file = self.tool_data_table.missing_index_file
-            else:
-                self.missing_tool_data_table_name = tool_data_table_name
-                log.warning("Data table named '%s' is required by tool but not configured" % tool_data_table_name)
+        self._tool_data_table = None
+        self.elem = elem
+        self.column_elem = elem.find("column")
+        self.tool_data_table  # Need to touch tool data table once to populate self.columns
+
         # Options are defined by parsing tabular text data from a data file
         # on disk, a dataset, or the value of another parameter
-        elif data_file is not None or dataset_file is not None or from_parameter is not None:
+        if not self.tool_data_table_name and (data_file is not None or dataset_file is not None or from_parameter is not None):
             self.parse_column_definitions(elem)
             if data_file is not None:
                 data_file = data_file.strip()
@@ -523,7 +550,8 @@ class DynamicOptions(object):
                     full_path = os.path.join(self.tool_param.tool.app.config.tool_data_path, data_file)
                     if os.path.exists(full_path):
                         self.index_file = data_file
-                        self.file_fields = self.parse_file_fields(open(full_path))
+                        with open(full_path) as fh:
+                            self.file_fields = self.parse_file_fields(fh)
                     else:
                         self.missing_index_file = data_file
             elif dataset_file is not None:
@@ -544,6 +572,30 @@ class DynamicOptions(object):
 
         if self.dataset_ref_name:
             tool_param.data_ref = self.dataset_ref_name
+
+    @property
+    def tool_data_table(self):
+        if self.tool_data_table_name:
+            tool_data_table = self.tool_param.tool.app.tool_data_tables.get(self.tool_data_table_name, None)
+            if tool_data_table:
+                # Column definitions are optional, but if provided override those from the table
+                if self.column_elem is not None:
+                    self.parse_column_definitions(self.elem)
+                else:
+                    self.columns = tool_data_table.columns
+                # Set self.missing_index_file if the index file to
+                # which the tool_data_table refers does not exist.
+                if tool_data_table.missing_index_file:
+                    self.missing_index_file = tool_data_table.missing_index_file
+            return tool_data_table
+        return None
+
+    @property
+    def missing_tool_data_table_name(self):
+        if not self.tool_data_table:
+            log.warning("Data table named '%s' is required by tool but not configured" % self.tool_data_table_name)
+            return self.tool_data_table_name
+        return None
 
     def parse_column_definitions(self, elem):
         for column_elem in elem.findall('column'):
@@ -604,16 +656,20 @@ class DynamicOptions(object):
             # Ensure parsing dynamic options does not consume more than a megabyte worth memory.
             path = dataset.file_name
             if os.path.getsize(path) < 1048576:
-                options = self.parse_file_fields(open(path))
+                with open(path) as fh:
+                    options = self.parse_file_fields(fh)
             else:
                 # Pass just the first megabyte to parse_file_fields.
                 log.warning("Attempting to load options from large file, reading just first megabyte")
-                contents = open(path, 'r').read(1048576)
+                with open(path, 'r') as fh:
+                    contents = fh.read(1048576)
                 options = self.parse_file_fields(StringIO(contents))
         elif self.tool_data_table:
             options = self.tool_data_table.get_fields()
-        else:
+        elif self.file_fields:
             options = list(self.file_fields)
+        else:
+            options = []
         for filter in self.filters:
             options = filter.filter_options(options, trans, other_values)
         return options
@@ -648,7 +704,7 @@ class DynamicOptions(object):
 
     def get_options(self, trans, other_values):
         rval = []
-        if self.file_fields is not None or self.tool_data_table is not None or self.dataset_ref_name is not None:
+        if self.file_fields is not None or self.tool_data_table is not None or self.dataset_ref_name is not None or self.missing_index_file:
             options = self.get_fields(trans, other_values)
             for fields in options:
                 rval.append((fields[self.columns['name']], fields[self.columns['value']], False))
