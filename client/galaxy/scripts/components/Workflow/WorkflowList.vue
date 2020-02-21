@@ -3,7 +3,7 @@
         <div v-if="error" class="alert alert-danger" show>{{ error }}</div>
         <div v-else>
             <span v-if="loading">
-                <span class="fa fa-spinner fa-spin" />
+                <font-awesome-icon icon="spinner" spin />
                 Loading workflows...
             </span>
             <div v-else>
@@ -23,11 +23,11 @@
                     <b-col v-if="!simplified">
                         <span class="float-right">
                             <b-button id="workflow-create" class="m-1" @click="createWorkflow">
-                                <span class="fa fa-plus" />
+                                <font-awesome-icon icon="plus" />
                                 Create
                             </b-button>
                             <b-button id="workflow-import" class="m-1" @click="importWorkflow">
-                                <span class="fa fa-upload" />
+                                <font-awesome-icon icon="upload" />
                                 Import
                             </b-button>
                         </span>
@@ -42,7 +42,7 @@
                     @filtered="filtered"
                 >
                     <template v-slot:cell(name)="row">
-                        <workflowdropdown
+                        <WorkflowDropdown
                             :workflow="row.item"
                             @onAdd="onAdd"
                             @onRemove="onRemove"
@@ -52,13 +52,14 @@
                         />
                     </template>
                     <template v-slot:cell(tags)="row">
-                        <workflowtags :workflow="row.item" @onError="onError" />
+                        <Tags :index="row.index" :tags="row.item.tags" @input="onTags" />
                     </template>
-
                     <template v-slot:cell(bookmark)="row">
                         <b-form-checkbox v-model="row.item.show_in_tool_panel" @change="bookmarkWorkflow(row.item)" />
                     </template>
-
+                    <template v-slot:cell(create_time)="data">
+                        <UtcDate :date="data.value" mode="elapsed" />
+                    </template>
                     <template v-slot:cell(execute)="row">
                         <b-button
                             v-b-tooltip.hover.bottom
@@ -80,10 +81,21 @@
     </div>
 </template>
 <script>
+import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
+import { library } from "@fortawesome/fontawesome-svg-core";
+import { faPlus } from "@fortawesome/free-solid-svg-icons";
+import { faSpinner } from "@fortawesome/free-solid-svg-icons";
+import { faUpload } from "@fortawesome/free-solid-svg-icons";
+
 import { getAppRoot } from "onload/loadConfig";
-import { Services } from "./services.js";
-import WorkflowTags from "./WorkflowTags.vue";
-import WorkflowDropdown from "./WorkflowDropdown.vue";
+import { Services } from "./services";
+import Tags from "components/Common/Tags";
+import WorkflowDropdown from "./WorkflowDropdown";
+import UtcDate from "components/UtcDate";
+
+library.add(faPlus);
+library.add(faUpload);
+library.add(faSpinner);
 
 const NAME_FIELD = {key: "name", sortable: true};
 const TAGS_FIELD = {key: "tags", sortable: true};
@@ -93,8 +105,10 @@ const EXECUTE_FIELD = {key: "execute", "label": ""};
 
 export default {
     components: {
-        workflowtags: WorkflowTags,
-        workflowdropdown: WorkflowDropdown
+        FontAwesomeIcon,
+        UtcDate,
+        Tags,
+        WorkflowDropdown
     },
     props: {
         simplified: {
@@ -105,7 +119,32 @@ export default {
     data() {
         return {
             error: null,
+<<<<<<< HEAD
             fields: this.simplified ?  [NAME_FIELD, TAGS_FIELD, EXECUTE_FIELD] : [NAME_FIELD, TAGS_FIELD, BOOKMARK_FIELD, EXECUTE_FIELD],
+=======
+            fields: [
+                {
+                    key: "name",
+                    sortable: true
+                },
+                {
+                    key: "tags",
+                    sortable: true
+                },
+                {
+                    label: "Created",
+                    key: "create_time",
+                    sortable: true
+                },
+                {
+                    key: "bookmark"
+                },
+                {
+                    key: "execute",
+                    label: ""
+                }
+            ],
+>>>>>>> 2d5f7e9d3573eb3bd61e66e5785caecb50adb3ae
             filter: "",
             loading: true,
             message: null,
@@ -171,6 +210,18 @@ export default {
                 .updateWorkflow(id, data)
                 .then(() => {
                     window.location = `${getAppRoot()}workflows/list`;
+                })
+                .catch(error => {
+                    this.onError(error);
+                });
+        },
+        onTags: function(tags, index) {
+            const workflow = this.workflows[index];
+            workflow.tags = tags;
+            this.services
+                .updateWorkflow(workflow.id, {
+                    show_in_tool_panel: workflow.show_in_tool_panel,
+                    tags: workflow.tags
                 })
                 .catch(error => {
                     this.onError(error);
