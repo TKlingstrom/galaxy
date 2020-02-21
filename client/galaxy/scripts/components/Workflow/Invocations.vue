@@ -1,9 +1,16 @@
 <template>
     <div>
+<<<<<<< HEAD
         <h2 class="mb-3" v-if="showTitle">
             <span id="invocations-title">Workflow Invocations</span>
         </h2>
         <b-alert variant="info" show v-if="headerMessage && showTitle">
+=======
+        <h2 class="mb-3">
+            <span id="invocations-title">Workflow Invocations</span>
+        </h2>
+        <b-alert variant="info" show v-if="headerMessage">
+>>>>>>> 2d5f7e9d3573eb3bd61e66e5785caecb50adb3ae
             {{ headerMessage }}
         </b-alert>
         <b-alert v-if="loading" variant="info" show>
@@ -19,35 +26,55 @@
                 :items="invocationItemsComputed"
                 v-model="invocationItemsModel"
                 hover
+<<<<<<< HEAD
                 responsive
+=======
+>>>>>>> 2d5f7e9d3573eb3bd61e66e5785caecb50adb3ae
                 striped
                 caption-top
                 :busy="loading"
             >
                 <template v-slot:table-caption>
+<<<<<<< HEAD
                     <p v-if="showTitle">
                         These invocations are not finished scheduling - one or more steps are waiting on others steps to be
                         complete before the full structure of the jobs in the workflow can be determined.
                     </p>
+=======
+                    These invocations are not finished scheduling - one or more steps are waiting on others steps to be
+                    complete before the full structure of the jobs in the workflow can be determined.
+>>>>>>> 2d5f7e9d3573eb3bd61e66e5785caecb50adb3ae
                 </template>
                 <template v-slot:row-details="row">
                     <b-card>
                         <!-- set provideContext to false, since the table itself provides this information -->
+<<<<<<< HEAD
                         <workflow-invocation-state :invocationId="row.item.id" :provideContext="false" />
+=======
+                        <workflow-invocation-state :invocation-id="row.item.id" :provide-context="false" />
+>>>>>>> 2d5f7e9d3573eb3bd61e66e5785caecb50adb3ae
                     </b-card>
                 </template>
                 <template v-slot:cell(details)="data">
                     <b-button
                         v-b-tooltip.hover.bottom
                         title="Show Invocation Details"
+<<<<<<< HEAD
                         class="btn-sm fa fa-plus"
+=======
+                        class="btn-sm fa fa-chevron-down"
+>>>>>>> 2d5f7e9d3573eb3bd61e66e5785caecb50adb3ae
                         v-if="!data.detailsShowing"
                         @click.stop="swapRowDetails(data)"
                     />
                     <b-button
                         v-b-tooltip.hover.bottom
                         title="Hide Invocation Details"
+<<<<<<< HEAD
                         class="btn-sm fa fa-minus"
+=======
+                        class="btn-sm fa fa-chevron-up"
+>>>>>>> 2d5f7e9d3573eb3bd61e66e5785caecb50adb3ae
                         v-if="data.detailsShowing"
                         @click.stop="swapRowDetails(data)"
                     />
@@ -82,6 +109,7 @@ import HistoryDropdown from "components/History/HistoryDropdown";
 import { mapCacheActions } from "vuex-cache";
 import { mapGetters } from "vuex";
 
+<<<<<<< HEAD
 const DETAILS_FIELD = { key: "details", label: "" };
 const WORKFLOW_FIELD = { key: "workflow_id", label: "Workflow" };
 const HISTORY_FIELD = { key: "history_id", label: "History" };
@@ -99,6 +127,8 @@ const FIELDS = [
     CREATE_TIME_FIELD,
 ];
 
+=======
+>>>>>>> 2d5f7e9d3573eb3bd61e66e5785caecb50adb3ae
 export default {
     components: {
         WorkflowInvocationState,
@@ -111,12 +141,27 @@ export default {
         loading: { type: Boolean, default: true },
         noInvocationsMessage: { type: String },
         headerMessage: { type: String, default: "" },
+<<<<<<< HEAD
         showTitle: { type: Boolean, default: true },
         ownerGrid: { type: Boolean, default: true },
         simplified: { type: Boolean, default: false },
     },
     data() {
         const fields = FIELDS.filter(field => (!this.simplified || !field.complex) ? true : false);
+=======
+        ownerGrid: { type: Boolean, default: true }
+    },
+    data() {
+        const fields = [
+            { key: "details", label: "" },
+            { key: "workflow_id", label: "Workflow" },
+            { key: "history_id", label: "History" },
+            { key: "id", label: "Invocation ID" },
+            { key: "state" },
+            { key: "update_time", label: "Last Update" },
+            { key: "create_time", label: "Invocation Time" }
+        ];
+>>>>>>> 2d5f7e9d3573eb3bd61e66e5785caecb50adb3ae
         return {
             invocationItemsModel: [],
             invocationFields: fields,
